@@ -22,6 +22,19 @@ tasks.register("verifyStandaloneIndependence") {
         } }
         check(violations.isEmpty()) { "Standalone independence violations: ${violations.joinToString()}" }
         check(subprojects.map { it.path }.toSet() == setOf(":core", ":backend")) { "Unexpected module" }
+        // Resolve configured source roots as well: a relative/split path must not
+        // bypass the textual policy, and no undeclared local binary is needed.
+        val workspace = rootDir.canonicalFile.toPath()
+        subprojects.forEach { module ->
+            module.extensions.getByType<org.gradle.api.plugins.JavaPluginExtension>().sourceSets.forEach { sourceSet ->
+                sourceSet.allSource.srcDirs.forEach { source ->
+                    check(source.canonicalFile.toPath().startsWith(workspace)) { "External source root in ${module.path}: $source" }
+                }
+            }
+            check(module.configurations.none { configuration ->
+                configuration.dependencies.any { it is org.gradle.api.artifacts.FileCollectionDependency }
+            }) { "Local file dependency in ${module.path}; use declared repository dependencies" }
+        }
         println("STANDALONE_INDEPENDENCE PASS scanned=${files.size} modules=core,backend")
     }
 }

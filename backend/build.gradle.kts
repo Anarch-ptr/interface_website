@@ -12,6 +12,14 @@ tasks.register<JavaExec>("runDiagnosticClient") {
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("com.filamentvision.backend.DiagnosticClient")
 }
+tasks.register<JavaExec>("runSustainedVerifier") {
+    group = "verification"
+    description = "Run the real 30-minute four-scenario simulator acceptance gate."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("com.filamentvision.backend.SustainedVerifier")
+    workingDir = rootProject.projectDir
+    maxHeapSize = "256m"
+}
 
 kotlin {
     jvmToolchain(21)
