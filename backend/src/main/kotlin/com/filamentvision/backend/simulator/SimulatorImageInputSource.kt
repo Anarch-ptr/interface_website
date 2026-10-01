@@ -13,7 +13,8 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Explicitly owned producer. [frames] is a work-sharing ingress, not a broadcast:
- * each collected frame transfers ownership to that collector, which must close it.
+ * a successful emission transfers ownership to the collector, which must close it.
+ * If emission fails or is cancelled, the source closes and counts the frame as dropped.
  * At most one pending frame per camera is retained; observers do not own lifecycle.
  */
 @OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
@@ -25,6 +26,7 @@ class SimulatorImageInputSource(
     private val framePeriodMillis: Long = 125,
     private val epochMillis: () -> Long = System::currentTimeMillis,
     private val monotonicNanos: () -> Long = { System.nanoTime().coerceAtLeast(0) },
+    private val factory: SimulatorFrameFactory = SimulatorFrameFactory(),
 ) : ImageInputSource {
     init {
         require(framePeriodMillis > 0) { "Frame period must be positive" }
@@ -33,7 +35,6 @@ class SimulatorImageInputSource(
 
     private val lifecycle = Mutex()
     private var producer: Job? = null
-    private val factory = SimulatorFrameFactory()
     private val mutableState = MutableStateFlow(ImageInputState.IDLE)
     override val state = mutableState.asStateFlow()
     private val mutableDiagnostics = MutableStateFlow(ImageInputDiagnostics())
@@ -57,7 +58,19 @@ class SimulatorImageInputSource(
             val next = synchronized(mailboxLock) {
                 pending.keys.firstOrNull()?.let { pending.remove(it) }
             }
-            if (next == null) ready.receive() else emit(next)
+            if (next == null) {
+                ready.receive()
+            } else {
+                try {
+                    emit(next)
+                } catch (error: Throwable) {
+                    // The removed frame is no longer reachable by mailbox cleanup.
+                    // Close is idempotent if the collector already released its lease.
+                    next.close()
+                    mutableDiagnostics.update { it.copy(droppedFrames = it.droppedFrames + 1) }
+                    throw error
+                }
+            }
         }
     }
 

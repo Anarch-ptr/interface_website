@@ -2,11 +2,15 @@ package com.filamentvision.backend.simulator
 
 import com.filamentvision.core.frame.CameraFrame
 import com.filamentvision.core.frame.CameraId
+import com.filamentvision.core.frame.FrameLease
 import com.filamentvision.core.frame.PixelBuffer
 import com.filamentvision.core.frame.PixelFormat
 
-/** Allocates one owned ARGB buffer per frame; no caller-owned array is retained. */
-class SimulatorFrameFactory {
+/**
+ * Allocates one owned ARGB buffer per frame; no caller-owned array is retained.
+ * [leaseFactory] supplies a fresh lifetime token for each generated frame.
+ */
+class SimulatorFrameFactory(private val leaseFactory: () -> FrameLease = { FrameLease() }) {
     fun create(cameraId: CameraId, epochMillis: Long, monotonicNanos: Long, sequence: Long,
                scenario: SimulationScenario, scenarioTick: Long, isCameraA: Boolean): CameraFrame {
         val width = when (scenario) {
@@ -23,6 +27,6 @@ class SimulatorFrameFactory {
             if (index / 48 < detectableRows && index % 48 in left until left + width) 0xff141414.toInt() else 0xffc8c8c8.toInt()
         }
         return CameraFrame(cameraId, epochMillis, monotonicNanos, 48, 8, PixelFormat.ARGB32,
-            PixelBuffer.ints(pixels), 0, false, sequence)
+            PixelBuffer.ints(pixels), 0, false, sequence, lease = leaseFactory())
     }
 }

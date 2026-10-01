@@ -72,7 +72,11 @@ while frame scheduling remains under virtual time.
 
 The frame stream is a work-sharing ingress for the future runtime, not a
 broadcast bus: collectors compete for frames and never start or stop the source.
-Each collector owns an accepted frame and closes it after use. Future preview
+Each collector owns a successfully emitted frame and closes it after use. If
+`emit` throws or is cancelled, the source closes the removed frame, counts one
+drop and rethrows; lease idempotence protects a frame already closed downstream.
+A collector must finish using an interrupted emission's frame before unwinding,
+and must not retain it after collection fails or short-circuits. Future preview
 fanout belongs downstream of that owner. There is one pending frame per camera
 (at most two images), plus one conflated wake-up signal. Replacement closes
 the old image and increments `droppedFrames`. Stop/failure also close and count
@@ -82,6 +86,8 @@ frames belong to the collector and are not revoked by stop.
 
 Each generated image owns a fresh array, exposed only through PixelBuffer's
 read-only view. There is no mutable external input to copy and no array reuse.
+The injected frame factory can supply a fresh FrameLease per image, allowing
+the composition root to attach resource-release policy without changing delivery.
 CameraFrame.close is safe to call repeatedly under its existing lease contract.
 Diagnostic/state/scenario flows retain one value each. Identity/sequence maps
 have exactly two configured keys. No history, reliable event delivery, runtime,

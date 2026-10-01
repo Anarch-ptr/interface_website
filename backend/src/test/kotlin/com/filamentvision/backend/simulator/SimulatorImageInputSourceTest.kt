@@ -2,6 +2,7 @@ package com.filamentvision.backend.simulator
 
 import com.filamentvision.core.frame.CameraFrame
 import com.filamentvision.core.frame.CameraId
+import com.filamentvision.core.frame.FrameLease
 import com.filamentvision.core.input.ImageInputState
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
@@ -11,12 +12,93 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SimulatorImageInputSourceTest {
-    private fun TestScope.source() = SimulatorImageInputSource(
+    private fun TestScope.source(factory: SimulatorFrameFactory = SimulatorFrameFactory()) = SimulatorImageInputSource(
         scope = backgroundScope, dispatcher = StandardTestDispatcher(testScheduler),
         cameraAId = CameraId("left"), cameraBId = CameraId("right"),
         epochMillis = { 1_000 + testScheduler.currentTime },
         monotonicNanos = { testScheduler.currentTime * 1_000_000 },
+        factory = factory,
     )
+
+    private fun trackingFactory(releases: MutableList<Int>) = SimulatorFrameFactory {
+        val index = releases.size
+        releases += 0
+        FrameLease { releases[index]++ }
+    }
+
+    // Missing close on replacement or repeated close during stop would change actual release callbacks.
+    @Test fun replacementAndStopReleaseEveryDiscardedLeaseExactlyOnce() = runTest {
+        val releases = mutableListOf<Int>()
+        val source = source(trackingFactory(releases))
+        source.start(); runCurrent()
+        assertEquals(listOf(0, 0), releases)
+        advanceTimeBy(125); runCurrent()
+        assertEquals(listOf(1, 1, 0, 0), releases)
+        assertEquals(2L, source.diagnostics.value.droppedFrames)
+        source.stop(); source.stop()
+        assertEquals(listOf(1, 1, 1, 1), releases)
+        assertEquals(4L, source.diagnostics.value.droppedFrames)
+    }
+
+    // Failure must release queued leases before stop, without a second release on repeated failure ticks.
+    @Test fun failureReleasesQueuedLeasesExactlyOnce() = runTest {
+        val releases = mutableListOf<Int>()
+        val source = source(trackingFactory(releases))
+        source.start(); runCurrent()
+        source.setScenario(SimulationScenario.CONNECTION_FAILURE)
+        advanceTimeBy(125); runCurrent()
+        assertEquals(listOf(1, 1), releases)
+        advanceTimeBy(250); runCurrent()
+        source.stop()
+        assertEquals(listOf(1, 1), releases)
+        assertEquals(2L, source.diagnostics.value.droppedFrames)
+    }
+
+    // A cancelled emit has already removed the frame from the mailbox; source cleanup must still release it.
+    @Test fun cancelledHandoffReleasesRemovedLeaseAndCountsOneDrop() = runTest {
+        val releases = mutableListOf<Int>()
+        val source = source(trackingFactory(releases))
+        source.setScenario(SimulationScenario.CAMERA_A_ONLY)
+        source.start(); runCurrent()
+        val received = CompletableDeferred<CameraFrame>()
+        val collector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            source.frames.collect { received.complete(it); awaitCancellation() }
+        }
+        val frame = received.await()
+        assertEquals(listOf(0), releases)
+        collector.cancelAndJoin()
+        assertEquals(listOf(1), releases)
+        assertEquals(1L, source.diagnostics.value.droppedFrames)
+        assertEquals(1, source.activeProducerCount)
+        frame.close()
+        source.stop()
+        assertEquals(listOf(1), releases)
+        assertEquals(1L, source.diagnostics.value.droppedFrames)
+    }
+
+    // A downstream failure must propagate unchanged while cleanup remains safe if downstream already closed.
+    @Test fun throwingHandoffCountsDropAndDoesNotReleaseLeaseTwice() = runTest {
+        val releases = mutableListOf<Int>()
+        val source = source(trackingFactory(releases))
+        source.setScenario(SimulationScenario.CAMERA_A_ONLY)
+        source.start(); runCurrent()
+        val failure = IllegalStateException("consumer failure")
+        val observed = CompletableDeferred<Throwable>()
+        val collector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            try {
+                source.frames.collect { it.close(); throw failure }
+            } catch (error: IllegalStateException) {
+                observed.complete(error)
+            }
+        }
+        collector.join()
+        assertSame(failure, observed.await())
+        assertEquals(listOf(1), releases)
+        assertEquals(1L, source.diagnostics.value.droppedFrames)
+        source.stop()
+        assertEquals(listOf(1), releases)
+        assertEquals(1L, source.diagnostics.value.droppedFrames)
+    }
 
     // Removing the start mutex would create multiple jobs; removing join/queue clearing leaks frames after stop.
     @Test fun concurrentStartsOwnOneProducerAndStopJoinsIt() = runTest {
