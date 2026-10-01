@@ -9,6 +9,7 @@ import com.filamentvision.core.model.*
 import com.filamentvision.core.session.SessionStatisticsAccumulator
 import com.filamentvision.core.vision.VisionProcessor
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -162,11 +163,19 @@ class MonitoringRuntime(
                     source.state.first { it == ImageInputState.ERROR }
                     error(source.diagnostics.value.lastError ?: "Image input failed")
                 }
+                // Deadlines advance independently of I/O. Conflation retains one overdue
+                // deadline during a slow write, without accumulating catch-up flush jobs.
+                val flushTicks = Channel<Unit>(Channel.CONFLATED)
                 launch {
-                    while (isActive) {
-                        delay(flushIntervalMillis)
-                        flushMeasurements(reservation)
-                    }
+                    try {
+                        while (isActive) {
+                            delay(flushIntervalMillis)
+                            flushTicks.send(Unit)
+                        }
+                    } finally { flushTicks.close() }
+                }
+                launch {
+                    for (tick in flushTicks) flushMeasurements(reservation)
                 }
                 source.frames.collect { accept(reservation, it) }
                 error("Image input completed")

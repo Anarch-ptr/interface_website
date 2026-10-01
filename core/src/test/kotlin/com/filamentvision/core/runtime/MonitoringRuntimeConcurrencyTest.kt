@@ -7,6 +7,55 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MonitoringRuntimeConcurrencyTest {
+    @Test fun slowWriteDoesNotRestartTheOneSecondPendingMeasurementDeadline() = runTest {
+        val h = Harness(backgroundScope)
+        val writeStarts = mutableListOf<Long>()
+        h.sink.onWrite = {
+            writeStarts += testScheduler.currentTime
+            if (writeStarts.size == 1) delay(800)
+        }
+        h.runtime.start(StartMonitoringCommand("start"))
+        h.send(5); runCurrent()
+        advanceTimeBy(1001); runCurrent()
+        assertEquals(listOf(1000L), writeStarts)
+        h.send(1, 5); runCurrent()
+        assertEquals(6L, h.runtime.state.value.statistics.sampleCount)
+        advanceTimeBy(799); runCurrent()
+        assertEquals(5, h.sink.measurements.size)
+        assertEquals(MonitoringLifecycle.RUNNING, h.runtime.state.value.lifecycle)
+        advanceTimeBy(201); runCurrent()
+        // The sample accepted at 1001 must be written by 2001, without stop forcing a flush.
+        assertEquals(6, h.sink.measurements.size)
+        assertEquals(listOf(1000L, 2000L), writeStarts)
+        assertEquals(MonitoringLifecycle.RUNNING, h.runtime.state.value.lifecycle)
+        h.runtime.close()
+        h.assertFinalized(6)
+        assertEquals(listOf(5, 1), h.sink.batchSizes)
+    }
+
+    @Test fun overdueFlushTicksConflateAndDrainImmediatelyAfterLongWrite() = runTest {
+        val h = Harness(backgroundScope)
+        val writeStarts = mutableListOf<Long>()
+        h.sink.onWrite = {
+            writeStarts += testScheduler.currentTime
+            if (writeStarts.size == 1) delay(3800)
+        }
+        h.runtime.start(StartMonitoringCommand("start"))
+        h.send(5); runCurrent()
+        advanceTimeBy(1001); runCurrent()
+        h.send(1, 5); runCurrent()
+        advanceTimeBy(3799); runCurrent()
+        assertEquals(MonitoringLifecycle.RUNNING, h.runtime.state.value.lifecycle)
+        assertEquals(listOf(1000L, 4800L), writeStarts)
+        assertEquals(6, h.sink.measurements.size)
+        // Multiple elapsed ticks cause one overdue flush, then the timer waits normally.
+        advanceTimeBy(199); runCurrent()
+        assertEquals(2, writeStarts.size)
+        h.runtime.close()
+        h.assertFinalized(6)
+        assertEquals(listOf(5, 1), h.sink.batchSizes)
+    }
+
     @Test fun injectedPairingAndIdentityCallbacksCanReadRuntimeAndBurstKeepsBatchThreshold() = runTest {
         lateinit var h: Harness
         val callbackReads = mutableListOf<Boolean>()
