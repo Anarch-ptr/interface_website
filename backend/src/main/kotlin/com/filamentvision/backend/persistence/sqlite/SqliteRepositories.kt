@@ -35,6 +35,31 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         }
     }
     override fun session(id: String): SessionRecord? = database.access { it.session(id) }
+    override fun sessions(after: HistoryCursor?, limit: Int, from: Long?, through: Long?): List<SessionRecord> {
+        if (limit !in 1..1000 || from != null && through != null && from > through) fail(RepositoryFailure.INVALID, "Invalid session range")
+        return database.access { c ->
+            val predicates = mutableListOf("1=1")
+            val values = mutableListOf<Any?>()
+            if (after != null) { predicates += "(started_at > ? OR (started_at = ? AND id > ?))"; values.addAll(listOf(after.timestamp, after.timestamp, after.id)) }
+            if (from != null) { predicates += "started_at >= ?"; values += from }
+            if (through != null) { predicates += "started_at <= ?"; values += through }
+            values += limit
+            c.query("SELECT id FROM sessions WHERE " + predicates.joinToString(" AND ") + " ORDER BY started_at,id LIMIT ?", values) { it.getString("id") }
+                .map { c.session(it)!! }
+        }
+    }
+    override fun error(id: String): ErrorRecord? = database.access { c ->
+        c.query("SELECT * FROM errors WHERE id=?", listOf(id)) { it.errorRecord() }.singleOrNull()
+    }
+    override fun allErrors(): List<ErrorRecord> = database.access { c ->
+        c.query("SELECT * FROM errors ORDER BY timestamp,id", emptyList()) { it.errorRecord() }
+    }
+    private fun ResultSet.errorRecord() = ErrorRecord(getString("id"), getString("session_id"), getLong("timestamp"), getString("code"), getString("message"))
+    override fun snapshot(id: String): SnapshotRecord? = database.access { c ->
+        c.query("SELECT * FROM snapshots WHERE id=?", listOf(id)) {
+            SnapshotRecord(it.getString("id"), it.getString("session_id"), it.getLong("timestamp"), it.getString("camera_id"), it.getString("object_key"), it.longOrNull("source_sequence"))
+        }.singleOrNull()
+    }
     private fun Connection.session(id: String): SessionRecord? = query("SELECT * FROM sessions WHERE id=?", listOf(id)) {
         val session = RuntimeSession(it.getString("id"), it.getLong("generation"), it.getLong("started_at"))
         val ended = it.longOrNull("ended_at")

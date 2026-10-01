@@ -23,6 +23,14 @@ class FileSnapshotObjectStore internal constructor(root: Path,
     private val realRoot = configuredRoot.toRealPath()
     init { require(Files.isDirectory(realRoot)) { "Snapshot root must be a directory" } }
     constructor(root: Path) : this(root, { path, bytes -> Files.write(path, bytes); Unit })
+    fun read(objectKey: String): ByteArray {
+        require(objectKey.matches(Regex("snapshot-[A-Za-z0-9_-]+/encoded\\.bin"))) { "Invalid object key" }
+        if (configuredRoot.toRealPath() != realRoot) throw IOException("Snapshot root changed")
+        val resolved = realRoot.resolve(objectKey).toRealPath()
+        require(resolved.startsWith(realRoot) && Files.isRegularFile(resolved)) { "Object outside store" }
+        require(Files.size(resolved) <= 4 * 1024 * 1024) { "Object exceeds read budget" }
+        return Files.readAllBytes(resolved)
+    }
     fun write(sessionId: String, snapshot: EncodedSnapshot): StoredSnapshot {
         require(sessionId.isNotBlank())
         if (configuredRoot.toRealPath() != realRoot) throw IOException("Snapshot root changed")

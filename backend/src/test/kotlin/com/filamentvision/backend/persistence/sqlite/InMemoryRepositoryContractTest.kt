@@ -28,6 +28,14 @@ private class InMemoryRepositories : SessionRepository, MeasurementRepository, A
         sessions[finalization.session.id] = SessionRecord(finalization.session, finalization)
     }
     override fun session(id: String) = sessions[id]
+    override fun sessions(after: HistoryCursor?, limit: Int, from: Long?, through: Long?) = sessions.values.filter {
+        val s = it.session
+        (after == null || s.startedAtEpochMillis > after.timestamp || s.startedAtEpochMillis == after.timestamp && s.id > after.id) &&
+            (from == null || s.startedAtEpochMillis >= from) && (through == null || s.startedAtEpochMillis <= through)
+    }.sortedWith(compareBy({ it.session.startedAtEpochMillis }, { it.session.id })).take(limit)
+    override fun error(id: String) = errors[id]
+    override fun allErrors() = errors.values.toList()
+    override fun snapshot(id: String) = snapshots[id]
     override fun appendMeasurements(batch: List<MeasurementRecord>) {
         val staged = measurements.toMutableMap()
         batch.forEach {

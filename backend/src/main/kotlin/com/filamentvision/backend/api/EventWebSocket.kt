@@ -13,7 +13,8 @@ import kotlinx.coroutines.delay
  * Each client holds at most one replay window; publication never invokes or waits for it.
  */
 fun Application.installEventWebSocket(backend: BackendApplication, hub: SequencedEventHub,
-    deviceIds: Set<String>, epochMillis: () -> Long = System::currentTimeMillis) {
+    deviceIds: Set<String>, epochMillis: () -> Long = System::currentTimeMillis,
+    pollIntervalMillis: () -> Long = { 10 }) {
     val devices = deviceIds.toSet()
     require(devices.isNotEmpty())
     devices.forEach { hub.metrics(it) }
@@ -28,14 +29,14 @@ fun Application.installEventWebSocket(backend: BackendApplication, hub: Sequence
                 val rawCursor = query.singleQuery("afterSequence")
                 val after = rawCursor?.toLongOrNull()
                 subscriptionValid(rawCursor == null || after != null && after >= 0 && rawCursor.matches(Regex("[0-9]+")))
-                streamEvents(backend, hub, device!!, after, epochMillis, ::sendJson)
+                streamEvents(backend, hub, device!!, after, epochMillis, pollIntervalMillis, send = ::sendJson)
             }
         }
     }
 }
 
 internal suspend fun streamEvents(backend: BackendApplication, hub: SequencedEventHub, device: String,
-    after: Long?, epochMillis: () -> Long, send: suspend (EventDto) -> Unit) {
+    after: Long?, epochMillis: () -> Long, pollIntervalMillis: () -> Long = { 10 }, send: suspend (EventDto) -> Unit) {
     suspend fun snapshot(reason: String): Long {
         val state = backend.state(device)
         check(state.deviceId == device && state.eventSequence >= 0 && state.eventSequence <= hub.metrics(device).published)
@@ -50,7 +51,7 @@ internal suspend fun streamEvents(backend: BackendApplication, hub: SequencedEve
                 for (event in replay.events) {
                     send(event.toDto()); cursor = event.sequence; delivered = true
                 }
-                if (replay.events.isEmpty()) delay(10)
+                if (replay.events.isEmpty()) delay(pollIntervalMillis().coerceAtLeast(1))
             }
             is EventReplay.SnapshotRequired -> {
                 val next = snapshot(if (delivered) "SLOW_CONSUMER" else "REPLAY_EXPIRED")

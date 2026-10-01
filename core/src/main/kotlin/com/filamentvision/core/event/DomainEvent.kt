@@ -8,6 +8,8 @@ import com.filamentvision.core.runtime.SessionFinalization
 
 sealed interface DomainEvent {
     val deviceId: String
+    data class State(override val deviceId: String, val state: com.filamentvision.core.runtime.MonitoringState, val timestamp: Long) : DomainEvent
+    data class Configuration(override val deviceId: String, val revisions: com.filamentvision.core.repository.ConfigurationRevisions, val timestamp: Long) : DomainEvent
     data class Measurement(override val deviceId: String, val record: MeasurementRecord) : DomainEvent
     data class Alarm(override val deviceId: String, val record: AlarmEventRecord) : DomainEvent
     data class SessionStarted(override val deviceId: String, val session: RuntimeSession) : DomainEvent

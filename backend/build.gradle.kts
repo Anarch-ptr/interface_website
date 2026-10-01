@@ -2,6 +2,15 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("org.jetbrains.kotlin.jvm")
+    application
+}
+
+application { mainClass.set("com.filamentvision.backend.BackendApplicationKt") }
+tasks.named<JavaExec>("run") { standardInput = System.`in` }
+tasks.register<JavaExec>("runDiagnosticClient") {
+    group = "application"
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("com.filamentvision.backend.DiagnosticClient")
 }
 
 kotlin {

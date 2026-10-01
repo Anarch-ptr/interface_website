@@ -10,7 +10,8 @@ import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import java.lang.ref.WeakReference
 
-fun Application.installPreviewWebSocket(hub: LatestPreviewHub, keys: Set<PreviewKey>, encoder: PreviewEncoder) {
+fun Application.installPreviewWebSocket(hub: LatestPreviewHub, keys: Set<PreviewKey>, encoder: PreviewEncoder,
+    maximumFramesPerSecond: () -> Int = { 30 }) {
     val allowed = keys.toSet()
     require(allowed.isNotEmpty())
     allowed.forEach { hub.latest(it) }
@@ -28,7 +29,7 @@ fun Application.installPreviewWebSocket(hub: LatestPreviewHub, keys: Set<Preview
                 val rawFps = query.singleQuery("maxFps")
                 val fps = rawFps?.toIntOrNull() ?: if (rawFps == null) 5 else 0
                 subscriptionValid(fps in 1..30)
-                streamPreviews(hub, key!!, encoder, fps) { metadata, bytes ->
+                streamPreviews(hub, key!!, encoder, fps, maximumFramesPerSecond = maximumFramesPerSecond) { metadata, bytes ->
                     withTimeout(5000) {
                         send(Frame.Text(apiJson.writeValueAsString(metadata)))
                         send(Frame.Binary(true, bytes)); flush()
@@ -44,15 +45,17 @@ fun Application.installPreviewWebSocket(hub: LatestPreviewHub, keys: Set<Preview
  */
 internal suspend fun streamPreviews(hub: LatestPreviewHub, key: PreviewKey, encoder: PreviewEncoder, fps: Int,
     nanos: () -> Long = System::nanoTime, pause: suspend (Long) -> Unit = { delay(it) },
+    maximumFramesPerSecond: () -> Int = { fps },
     send: suspend (PreviewMetadataDto, ByteArray) -> Unit) {
     require(fps in 1..30)
-    val interval = (1_000_000_000L + fps - 1) / fps
     var lastSent: Long? = null
     // Identity deduplication must not keep a previously sent raw payload alive.
     var delivered = WeakReference<PreviewFrame>(null)
     hub.frames(setOf(key)).collect { received ->
         if (received === delivered.get()) return@collect
         lastSent?.let { last ->
+            val rate = minOf(fps, maximumFramesPerSecond().coerceAtLeast(1))
+            val interval = (1_000_000_000L + rate - 1) / rate
             val remaining = interval - (nanos() - last)
             if (remaining > 0) pause((remaining + 999_999) / 1_000_000)
         }

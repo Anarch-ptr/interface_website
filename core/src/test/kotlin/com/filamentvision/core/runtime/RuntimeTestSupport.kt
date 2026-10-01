@@ -65,6 +65,7 @@ internal class TestSource : ImageInputSource {
 internal class RecordingSink : RuntimePersistence, RuntimeEventSink {
     var onWrite: suspend (List<OfficialMeasurement>) -> Unit = {}
     var onCreate: suspend () -> Unit = {}
+    var onAlarms: suspend () -> Unit = {}
     var writeFailure: Throwable? = null
     val created = mutableListOf<RuntimeSession>()
     val measurements = mutableListOf<OfficialMeasurement>()
@@ -82,6 +83,7 @@ internal class RecordingSink : RuntimePersistence, RuntimeEventSink {
         measurements += batch
     }
     override suspend fun writeAlarms(session: RuntimeSession, batch: List<AlarmTransition>) {
+        onAlarms()
         order += "alarms"
         alarms += batch
     }

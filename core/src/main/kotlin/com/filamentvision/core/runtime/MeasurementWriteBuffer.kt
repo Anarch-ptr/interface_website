@@ -9,6 +9,7 @@ internal class MeasurementWriteBuffer(private val batchSize: Int = 8) {
     class Batch(val measurements: List<OfficialMeasurement>)
     private var claimed: Batch? = null
     val ready get() = pending.size >= batchSize
+    val size get() = pending.size
     fun add(measurement: OfficialMeasurement) { pending += measurement }
     fun claim(): Batch? {
         if (claimed == null && pending.isNotEmpty()) claimed = Batch(pending.toList())

@@ -2,6 +2,7 @@ package com.filamentvision.core.runtime
 
 import com.filamentvision.core.alarm.*
 import com.filamentvision.core.config.VisionConfiguration
+import com.filamentvision.core.config.MonitoringConfiguration
 import com.filamentvision.core.frame.*
 import com.filamentvision.core.fusion.*
 import com.filamentvision.core.input.*
@@ -25,8 +26,8 @@ class MonitoringRuntime(
     private val source: ImageInputSource,
     configurations: Map<CameraId, VisionConfiguration>,
     private val pairingStrategy: FramePairingStrategy,
-    private val fusionConfiguration: FusionConfiguration,
-    private val targetDiameter: Double,
+    private var fusionConfiguration: FusionConfiguration,
+    private var targetDiameter: Double,
     private val persistence: RuntimePersistence,
     private val eventSink: RuntimeEventSink,
     commandCacheCapacity: Int = 128,
@@ -35,15 +36,15 @@ class MonitoringRuntime(
     private val processor: VisionProcessor = VisionProcessor(),
     private val fusionEngine: FusionEngine = FusionEngine(),
     realtimeCapacity: Int = 300,
-    private val writeBatchSize: Int = 8,
-    private val flushIntervalMillis: Long = 1000,
+    private var writeBatchSize: Int = 8,
+    private var flushIntervalMillis: Long = 1000,
 ) {
     init {
         require(targetDiameter > 0.0)
         require(writeBatchSize > 0)
         require(flushIntervalMillis > 0)
     }
-    private val configurations = configurations.toMap()
+    private var configurations = configurations.toMap()
     private val ownership = RuntimeOwnership(commandCacheCapacity)
     private val processing = Mutex()
     private val writing = Mutex()
@@ -51,7 +52,7 @@ class MonitoringRuntime(
     private val runtimeScope = CoroutineScope(scope.coroutineContext + job)
     private val mutableState = MutableStateFlow(MonitoringState())
     val state = mutableState.asStateFlow()
-    private val realtime = RealtimeMeasurementBuffer(realtimeCapacity)
+    private var realtime = RealtimeMeasurementBuffer(realtimeCapacity)
     private var writes = MeasurementWriteBuffer(writeBatchSize)
     private var statistics = SessionStatisticsAccumulator()
     private var alarm = AlarmEvaluator(targetDiameter)
@@ -139,6 +140,24 @@ class MonitoringRuntime(
     }
 
     suspend fun realtimeMeasurements(): List<OfficialMeasurement> = ownership.transition { realtime.snapshot() }
+
+    /** Reconfigures this owner only after successful finalization released its reservation. */
+    suspend fun configureWhenStopped(configuration: MonitoringConfiguration, cameraA: CameraId, cameraB: CameraId): Boolean {
+        configuration.validate()
+        require(cameraA != cameraB)
+        return ownership.transition {
+            if (ownership.closed || ownership.current != null) return@transition false
+            configurations = mapOf(cameraA to configuration.cameraA, cameraB to configuration.cameraB)
+            fusionConfiguration = configuration.fusion
+            targetDiameter = configuration.targetDiameter
+            writeBatchSize = configuration.writeBatchSize
+            flushIntervalMillis = configuration.flushIntervalMillis
+            realtime = RealtimeMeasurementBuffer(configuration.realtimeCapacity)
+            true
+        }
+    }
+
+    suspend fun queuedCounts(): Pair<Int, Int> = ownership.transition { writes.size to pendingAlarms.size }
 
     private suspend fun produce(reservation: RuntimeOwnership.Reservation) {
         var failure: Throwable? = null
@@ -257,10 +276,6 @@ class MonitoringRuntime(
         try {
             if (reservation.created) {
                 flushMeasurements(reservation, drain = true)
-                if (pendingAlarms.isNotEmpty()) {
-                    persistence.writeAlarms(reservation.session, pendingAlarms.toList())
-                    pendingAlarms.clear()
-                }
                 if (stopped) {
                     val finalization = SessionFinalization(reservation.session, epochMillis(), reason, statistics.snapshot(abnormalCount), error)
                     persistence.finalizeSession(finalization)
@@ -293,12 +308,24 @@ class MonitoringRuntime(
         // The writer lock serializes claims, not runtime reads or measurement acceptance.
         writing.withLock {
             do {
-                val batch = ownership.transition {
-                    if (ownership.current !== reservation || (thresholdOnly && !writes.ready)) null else writes.claim()
+                val claim = ownership.transition {
+                    if (ownership.current !== reservation || (thresholdOnly && !writes.ready)) null
+                    else writes.claim()?.let { it to pendingAlarms.toList() }
                 } ?: break
+                val (batch, alarms) = claim
                 persistence.writeMeasurements(reservation.session, batch.measurements)
                 ownership.transition { writes.acknowledge(batch) }
+                if (alarms.isNotEmpty()) {
+                    persistence.writeAlarms(reservation.session, alarms)
+                    ownership.transition { pendingAlarms.subList(0, alarms.size).clear() }
+                }
             } while (drain)
+            // A failed alarm write may outlive its already acknowledged measurement batch.
+            val alarms = ownership.transition { if (writes.size == 0) pendingAlarms.toList() else emptyList() }
+            if (alarms.isNotEmpty()) {
+                persistence.writeAlarms(reservation.session, alarms)
+                ownership.transition { pendingAlarms.subList(0, alarms.size).clear() }
+            }
         }
     }
 
