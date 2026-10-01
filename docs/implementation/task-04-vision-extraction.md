@@ -4,7 +4,7 @@ The portable `VisionProcessor` now accepts `CameraFrame` and `VisionConfiguratio
 
 ## Preserved behavior
 
-The operation order is configured source-coordinate mirrors, rotation, grayscale, threshold, edge map, row detection, median pixel width, millimetre conversion and confidence. ROI coordinates refer to the processed image. The row candidate nearest the ROI centre is selected; confidence remains row coverage multiplied by width consistency using population standard deviation. Manual threshold and sensitivity clamps, BT.601 rounding, Otsu first-best selection and its `+1` threshold convention follow the reference formulas.
+The operation order is source metadata normalization, configured geometry, grayscale, threshold, edge map, row detection, median pixel width, millimetre conversion and confidence. Source normalization applies `CameraFrame.mirrored` as a horizontal mirror, then `orientationDegrees` as rotation. Configured geometry applies its mirrors and rotation to that normalized image. ROI coordinates refer to the final processed image. The row candidate nearest the ROI centre is selected; confidence remains row coverage multiplied by width consistency using population standard deviation. Manual threshold and sensitivity clamps, BT.601 rounding, Otsu first-best selection and its `+1` threshold convention follow the reference formulas.
 
 The committed root fixture is exposed as a Core **test resource**, without a production dependency on fixtures or the reference module. Its literals were not modified:
 
@@ -20,11 +20,11 @@ The committed root fixture is exposed as a Core **test resource**, without a pro
 
 An all-100 image returns `NO_EDGES`, preserves ROI, and publishes neither a measurement nor overlay edges. Invalid calibration and ROI preserve their existing errors. A rejected dark run—including one touching the ROI boundary or failing edge sensitivity—retains the reference `WIDTH_OUT_OF_RANGE` classification. Low confidence preserves detected overlay edges but publishes no measurement. Confidence exactly equal to the minimum is accepted.
 
-The geometry tests cover an asymmetric 2×3 image through rotations and both mirror axes, plus the frozen 90°/vertical-mirror case whose stages are all 4×8. Configuration supplies the effective geometry, as in the reference. `CameraFrame.orientationDegrees` and `mirrored` remain source metadata; this extraction does not invent composition of source metadata and configured transforms. A future adapter/runtime must resolve any such policy explicitly.
+The geometry tests cover an asymmetric 2×3 image through rotations and both mirror axes, plus the frozen 90°/vertical-mirror case whose stages are all 4×8. Source-only orientation and horizontal mirroring have asymmetric literal tests. A combined case checks source normalization before configured mirroring and verifies the raw, grayscale, threshold and edge stages. Zero orientation and false source mirroring preserve all reference/configured-only behavior. Metadata normalization and configured transforms are separate sequential operations; they are not interchangeable.
 
 ## Data ownership and timing
 
-Geometry creates one owned ARGB output, including for identity geometry, allowing diagnostic output to outlive the input lease. Grayscale, threshold and edge processing each allocate their required output exactly once. Their `PixelBuffer` views expose indexed reads and no mutable arrays. The same computed stage buffers used by detection are retained in `VisionResult`; there is no copy per consumer and no preview packing, image encoding, or desktop API. Core does not close the input frame; its owner remains responsible for releasing it after processing.
+Geometry creates an owned ARGB output, including for identity geometry, allowing diagnostic output to outlive the input lease. When both source normalization and configured geometry are non-identity, each sequential transform creates its own output; the normalized intermediate is not retained. If either transform is identity, its extra copy is skipped, while preserving one owned final output. Grayscale, threshold and edge processing each allocate their required output exactly once. Their `PixelBuffer` views expose indexed reads and no mutable arrays. The same computed stage buffers used by detection are retained in `VisionResult`; there is no copy per consumer and no preview packing, image encoding, or desktop API. Core does not close the input frame; its owner remains responsible for releasing it after processing.
 
 The stages are full-resolution Core diagnostic data. Intensity stages contain scalar 0–255 values rather than the Android preview's packed grayscale ARGB values; the frozen golden tests check those exact scalar values. Android's 480-pixel UI thumbnail resizing and encoding remain adapter/presentation concerns and are not exposed as Core processing behavior.
 
@@ -32,7 +32,7 @@ The stages are full-resolution Core diagnostic data. Intensity stages contain sc
 
 ## Verification
 
-Each implementation slice followed a failing test and a minimal port: fixed golden, automatic Otsu, no edges, geometry, invalid calibration, invalid ROI, rejected dark runs, low confidence and BT.601. The initial test resource lookup needed a class-loader correction; no expected numeric value changed. Core Vision has 11 tests across three classes.
+Each implementation slice followed a failing test and a minimal port: fixed golden, automatic Otsu, no edges, geometry, invalid calibration, invalid ROI, rejected dark runs, low confidence and BT.601. Review fix round 1 added three failing tests for source orientation, source mirror and source-before-configured composition before implementing metadata normalization. The initial test resource lookup needed a class-loader correction; no expected numeric value changed. Core Vision has 14 tests across three classes.
 
 Run from this repository with the established offline Gradle/JDK environment:
 

@@ -154,6 +154,37 @@ class VisionGoldenTest {
         assertNull(accepted.error)
     }
 
+    @Test
+    fun sourceNormalizationBeforeConfiguredGeometryCatchesReversedCompositionOrLatePreprocessing() {
+        val input = CameraFrame(
+            CameraId("A"), 99, 100, 2, 3, PixelFormat.ARGB32,
+            PixelBuffer.ints(intArrayOf(10,100,20,200,30,250).map(::argb).toIntArray()),
+            90, true, 3,
+        )
+        val config = configuration().copy(
+            geometry = ImageGeometry(mirrorHorizontally = true),
+            calibration = calibration().copy(roiRight = 3, roiBottom = 2),
+        )
+        val result = processor().process(input, config)
+        // Source horizontal mirror, then 90 degrees: [250,200,100; 30,20,10].
+        // Configured horizontal mirror in that normalized coordinate space follows.
+        assertArrayEquals(intArrayOf(100,200,250,10,20,30).map(::argb).toIntArray(), values(result.rawStage.pixels))
+        assertArrayEquals(intArrayOf(100,200,250,10,20,30), values(result.grayscaleStage.intensities))
+        assertArrayEquals(intArrayOf(255,255,255,0,0,0), values(result.thresholdStage.intensities))
+        assertArrayEquals(intArrayOf(0,0,0,0,0,0), values(result.edgeStage.intensities))
+        assertEquals(3, result.processedWidth)
+        assertEquals(2, result.processedHeight)
+        assertEquals(3, result.rawStage.width)
+        assertEquals(2, result.rawStage.height)
+        listOf(result.grayscaleStage, result.thresholdStage, result.edgeStage).forEach {
+            assertEquals(3, it.width)
+            assertEquals(2, it.height)
+        }
+        assertEquals(CameraId("A"), result.cameraId)
+        assertEquals(99L, result.timestampMillis)
+        assertEquals(3L, result.sequence)
+    }
+
     private fun processor(): VisionProcessor {
         var now = 0L
         return VisionProcessor(clock = NanoClock { now.also { now += 10 } })

@@ -5,8 +5,19 @@ import com.filamentvision.core.frame.CameraFrame
 import com.filamentvision.core.frame.PixelBuffer
 
 object ImageGeometryTransformer {
-    /** Mirrors source coordinates before rotating, as in the characterized pipeline. */
+    /** Normalizes source metadata first, then applies configured geometry in normalized coordinates. */
     fun transform(frame: CameraFrame, geometry: ImageGeometry): ArgbStage {
+        val source = ArgbStage(frame.width, frame.height, frame.pixels)
+        if (frame.orientationDegrees == 0 && !frame.mirrored) return transformStage(source, geometry)
+        val normalized = transformStage(source, ImageGeometry(
+            rotationDegrees = frame.orientationDegrees,
+            mirrorHorizontally = frame.mirrored,
+        ))
+        return if (geometry == ImageGeometry()) normalized else transformStage(normalized, geometry)
+    }
+
+    /** Each transform mirrors its input coordinates before rotating, preserving the reference formula. */
+    private fun transformStage(frame: ArgbStage, geometry: ImageGeometry): ArgbStage {
         require(geometry.rotationDegrees in setOf(0, 90, 180, 270)) { "Rotation must be 0, 90, 180, or 270 degrees" }
         val swapped = geometry.rotationDegrees == 90 || geometry.rotationDegrees == 270
         val outputWidth = if (swapped) frame.height else frame.width
