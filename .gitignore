@@ -1,4 +1,5 @@
 .gradle/
+.gradle-user-home/
 .kotlin/
 build/
 **/build/
@@ -8,4 +9,3 @@ build/
 *.db-shm
 *.db-wal
 .superpowers/
-
