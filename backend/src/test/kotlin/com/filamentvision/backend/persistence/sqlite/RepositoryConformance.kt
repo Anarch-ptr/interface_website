@@ -80,7 +80,7 @@ abstract class RepositoryConformance {
         assertEquals(listOf(alarm), r.alarms.alarms("s"))
     }
     @Test fun snapshotAndErrorRecordsRetainDomainMetadataAndForeignKeys() {
-        val snapshot = SnapshotRecord("p", "s", 12, "B", "objects/p")
+        val snapshot = SnapshotRecord("p", "s", 12, "B", "objects/p", 123)
         val error = ErrorRecord("e", "s", 13, "INPUT", "source failed")
         fails(RepositoryFailure.INVALID) { r.snapshots.saveSnapshot(snapshot) }
         fails(RepositoryFailure.INVALID) { r.errors.saveError(error) }

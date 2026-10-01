@@ -13,5 +13,7 @@ data class MeasurementRecord(val id: String, val sessionId: String, val measurem
 data class HistoryCursor(val timestamp: Long, val id: String)
 data class MeasurementPage(val items: List<MeasurementRecord>, val nextCursor: HistoryCursor?)
 data class AlarmEventRecord(val id: String, val sessionId: String, val transition: AlarmTransition)
-data class SnapshotRecord(val id: String, val sessionId: String, val timestamp: Long, val cameraId: String, val objectKey: String)
+/** Null sourceSequence denotes legacy metadata whose source sequence was not recorded. */
+data class SnapshotRecord(val id: String, val sessionId: String, val timestamp: Long, val cameraId: String, val objectKey: String,
+    val sourceSequence: Long? = null)
 data class ErrorRecord(val id: String, val sessionId: String?, val timestamp: Long, val code: String, val message: String)

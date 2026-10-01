@@ -106,12 +106,12 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         }
     }
     override fun saveSnapshot(snapshot: SnapshotRecord) {
-        database.access(true) { it.update("INSERT INTO snapshots(id,session_id,timestamp,camera_id,object_key) VALUES (?,?,?,?,?)",
-            snapshot.id, snapshot.sessionId, snapshot.timestamp, snapshot.cameraId, snapshot.objectKey) }
+        database.access(true) { it.update("INSERT INTO snapshots(id,session_id,timestamp,camera_id,object_key,source_sequence) VALUES (?,?,?,?,?,?)",
+            snapshot.id, snapshot.sessionId, snapshot.timestamp, snapshot.cameraId, snapshot.objectKey, snapshot.sourceSequence) }
     }
     override fun snapshots(sessionId: String): List<SnapshotRecord> = database.access { connection ->
         connection.query("SELECT * FROM snapshots WHERE session_id=? ORDER BY timestamp,id", listOf(sessionId)) {
-            SnapshotRecord(it.getString("id"), it.getString("session_id"), it.getLong("timestamp"), it.getString("camera_id"), it.getString("object_key"))
+            SnapshotRecord(it.getString("id"), it.getString("session_id"), it.getLong("timestamp"), it.getString("camera_id"), it.getString("object_key"), it.longOrNull("source_sequence"))
         }
     }
     override fun saveError(error: ErrorRecord) {
