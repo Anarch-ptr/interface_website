@@ -12,4 +12,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "FilamentVisionBackend"
-include(":reference-characterization")
+include(":reference-characterization", ":core", ":backend")

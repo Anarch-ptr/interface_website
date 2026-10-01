@@ -1,1 +1,3 @@
-// The Task 1 root is deliberately limited to the temporary reference test module.
+plugins {
+    id("org.jetbrains.kotlin.jvm") version "2.2.10" apply false
+}
