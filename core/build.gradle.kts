@@ -43,19 +43,19 @@ tasks.register("verifyCorePlatformBoundary") {
     description = "Rejects platform imports and resolved runtime dependencies in Core."
 
     doLast {
-        val importPattern = Regex("^\\s*import\\s+(?:static\\s+)?([A-Za-z_][A-Za-z_0-9.]*)")
+        val importPattern = Regex("^\\s*import\\s+(?:static\\s+)?([A-Za-z_][A-Za-z_0-9.]*)", RegexOption.MULTILINE)
         val sourceViolations = fileTree("src/main") {
             include("**/*.kt", "**/*.java")
         }.flatMap { source ->
             var blockCommentDepth = 0
             var tripleQuoted = false
-            source.readLines().mapNotNull { line ->
-                val clean = StringBuilder()
+            val clean = StringBuilder()
+            source.readLines().forEach { line ->
                 var index = 0
                 var quoted = false
                 while (index < line.length) {
                     when {
-                        blockCommentDepth > 0 && line.startsWith("/*", index) -> { blockCommentDepth++; index += 2 }
+                        blockCommentDepth > 0 && line.startsWith("/*", index) -> { blockCommentDepth++; clean.append(' '); index += 2 }
                         blockCommentDepth > 0 && line.startsWith("*/", index) -> { blockCommentDepth--; index += 2 }
                         blockCommentDepth > 0 -> index++
                         tripleQuoted && line.startsWith("\"\"\"", index) -> { tripleQuoted = false; index += 3 }
@@ -64,16 +64,19 @@ tasks.register("verifyCorePlatformBoundary") {
                         quoted && line[index] == '"' -> { quoted = false; index++ }
                         quoted -> index++
                         line.startsWith("//", index) -> break
-                        line.startsWith("/*", index) -> { blockCommentDepth++; index += 2 }
-                        line.startsWith("\"\"\"", index) -> { tripleQuoted = true; index += 3 }
-                        line[index] == '"' -> { quoted = true; index++ }
+                        line.startsWith("/*", index) -> { blockCommentDepth++; clean.append(' '); index += 2 }
+                        line.startsWith("\"\"\"", index) -> { tripleQuoted = true; clean.append(' '); index += 3 }
+                        line[index] == '"' -> { quoted = true; clean.append(' '); index++ }
                         else -> { clean.append(line[index]); index++ }
                     }
                 }
-                importPattern.find(clean)?.groupValues?.get(1)?.let { imported ->
+                clean.append('\n')
+            }
+            importPattern.findAll(clean).mapNotNull { match ->
+                match.groupValues[1].let { imported ->
                     if (forbiddenImports.any(imported::startsWith)) "${source.path}: $imported" else null
                 }
-            }
+            }.toList()
         }
         check(sourceViolations.isEmpty()) {
             (listOf("Core production imports forbidden platform packages:") + sourceViolations).joinToString("\n")

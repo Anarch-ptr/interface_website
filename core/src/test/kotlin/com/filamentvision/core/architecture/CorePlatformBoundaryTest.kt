@@ -13,8 +13,8 @@ class CorePlatformBoundaryTest {
 
     @Test
     fun coreProductionSourcesDoNotImportPlatformPackages() {
-        val sources = File("src/main/kotlin").walkTopDown()
-            .filter { it.isFile && it.extension == "kt" }
+        val sources = File("src/main").walkTopDown()
+            .filter { it.isFile && it.extension in setOf("kt", "java") }
         val violations = sources.flatMap { file ->
             productionImports(file.readText()).asSequence().map { file.path to it }
         }.filter { (_, imported) -> forbidden.any(imported::startsWith) }.toList()
@@ -47,18 +47,34 @@ class CorePlatformBoundaryTest {
         assertTrue(productionImports(source) == listOf("java.sql.Driver"))
     }
 
+    @Test
+    fun javaImportsSeparatedByCommentOrNewlineAreInspected() {
+        val source = listOf(
+            "package example;",
+            "import/*x*/java.sql.Driver;",
+            "import",
+            "java.awt.Image;",
+            "/* import/*nested*/java.sql.Fake; */",
+            "String text = \"import/*x*/org.sqlite.Fake;\";",
+            "String block = \"\"\"",
+            "import",
+            "java.sql.Fake;",
+            "\"\"\";",
+        ).joinToString("\n")
+        assertTrue(productionImports(source) == listOf("java.sql.Driver", "java.awt.Image"))
+    }
+
     private fun productionImports(source: String): List<String> {
-        val importPattern = Regex("^\\s*import\\s+(?:static\\s+)?([A-Za-z_][A-Za-z_0-9.]*)")
+        val importPattern = Regex("^\\s*import\\s+(?:static\\s+)?([A-Za-z_][A-Za-z_0-9.]*)", RegexOption.MULTILINE)
         var blockCommentDepth = 0
         var tripleQuoted = false
-        val imports = mutableListOf<String>()
+        val clean = StringBuilder()
         for (line in source.lines()) {
-            val clean = StringBuilder()
             var index = 0
             var quoted = false
             while (index < line.length) {
                 when {
-                    blockCommentDepth > 0 && line.startsWith("/*", index) -> { blockCommentDepth++; index += 2 }
+                    blockCommentDepth > 0 && line.startsWith("/*", index) -> { blockCommentDepth++; clean.append(' '); index += 2 }
                     blockCommentDepth > 0 && line.startsWith("*/", index) -> { blockCommentDepth--; index += 2 }
                     blockCommentDepth > 0 -> index++
                     tripleQuoted && line.startsWith("\"\"\"", index) -> { tripleQuoted = false; index += 3 }
@@ -67,15 +83,15 @@ class CorePlatformBoundaryTest {
                     quoted && line[index] == '"' -> { quoted = false; index++ }
                     quoted -> index++
                     line.startsWith("//", index) -> break
-                    line.startsWith("/*", index) -> { blockCommentDepth++; index += 2 }
-                    line.startsWith("\"\"\"", index) -> { tripleQuoted = true; index += 3 }
-                    line[index] == '"' -> { quoted = true; index++ }
+                    line.startsWith("/*", index) -> { blockCommentDepth++; clean.append(' '); index += 2 }
+                    line.startsWith("\"\"\"", index) -> { tripleQuoted = true; clean.append(' '); index += 3 }
+                    line[index] == '"' -> { quoted = true; clean.append(' '); index++ }
                     else -> { clean.append(line[index]); index++ }
                 }
             }
-            importPattern.find(clean)?.groupValues?.get(1)?.let(imports::add)
+            clean.append('\n')
         }
-        return imports
+        return importPattern.findAll(clean).map { it.groupValues[1] }.toList()
     }
 
     @Test
