@@ -11,6 +11,10 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -112,9 +116,20 @@ private fun RoutingContext.pageQuery(scope: String): PageQuery {
     return PageQuery(query("cursor")?.let { decodeCursor(it, scope) }, limit, from, through)
 }
 private suspend inline fun <reified T> RoutingContext.body(): T {
-    if (call.request.contentType().withoutParameters() != ContentType.Application.Json) throw ApiHttpFailure(HttpStatusCode.UnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "JSON content type required")
-    return decodeRequest(call.receiveText())
+    val mediaType = try { call.request.contentType() }
+    catch (_: BadContentTypeFormatException) { throw unsupportedMedia() }
+    if (mediaType.withoutParameters() != ContentType.Application.Json) throw unsupportedMedia()
+    // Resolve explicitly: Ktor's charset() helper silently treats unknown names as absent.
+    val charset = try { mediaType.parameter("charset")?.let { Charset.forName(it) } ?: Charsets.UTF_8 }
+    catch (_: IllegalArgumentException) { throw unsupportedMedia() }
+    val bytes = call.receive<ByteArray>()
+    val text = try {
+        charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes)).toString()
+    } catch (_: CharacterCodingException) { throw badRequest() }
+    return decodeRequest(text)
 }
+private fun unsupportedMedia() = ApiHttpFailure(HttpStatusCode.UnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "Valid JSON content type and supported charset required")
 private suspend fun RoutingContext.reply(correlation: String, data: Any?, status: HttpStatusCode = HttpStatusCode.OK) {
     call.respondText(apiJson.writeValueAsString(ApiResponse(correlation, data)), ContentType.Application.Json, status)
 }

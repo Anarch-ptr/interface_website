@@ -22,6 +22,9 @@ by the application under its lifecycle guard. Draft updates require `expectedRev
 Requests require `application/json`. Unknown fields, duplicate fields, numeric/boolean
 values in string fields, null primitive values, malformed/trailing JSON, non-finite or
 invalid configuration values, and invalid revisions produce a structured 400 error.
+Malformed media types and unsupported/illegal charset names produce structured 415 errors.
+The default encoding is UTF-8; a supported explicit charset is decoded strictly. Malformed
+or unmappable body bytes produce 400 before command delegation rather than replacement text.
 Configuration enum strings use their documented Core enum names. Output uses explicit
 API DTOs only, with epoch-millisecond timestamps. Absent camera evidence is a whole-side
 null; numerical non-finite measurement/statistical/metric evidence maps to null. A final
