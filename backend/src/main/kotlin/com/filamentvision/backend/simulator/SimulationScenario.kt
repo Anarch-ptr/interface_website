@@ -1,0 +1,6 @@
+package com.filamentvision.backend.simulator
+
+enum class SimulationScenario {
+    NORMAL, HIGH_DIAMETER, LOW_DIAMETER, CAMERA_A_ONLY, CAMERA_B_ONLY, CAMERA_MISMATCH, TIMESTAMP_MISMATCH,
+    LOW_CONFIDENCE, TEMPORARY_DROPOUT, CONNECTION_FAILURE,
+}
