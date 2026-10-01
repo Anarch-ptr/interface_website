@@ -28,6 +28,10 @@ tasks.test {
     dependsOn("verifyCorePlatformBoundary")
 }
 
+sourceSets.test {
+    resources.srcDir(rootProject.file("fixtures"))
+}
+
 val forbiddenImports = listOf(
     "android.", "androidx.", "io.ktor.", "java.awt.", "javax.imageio.",
     "java.sql.", "org.sqlite.", "androidx.room.", "androidx.compose.",
