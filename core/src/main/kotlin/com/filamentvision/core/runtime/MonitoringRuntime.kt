@@ -10,6 +10,8 @@ import com.filamentvision.core.session.SessionStatisticsAccumulator
 import com.filamentvision.core.vision.VisionProcessor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 /** Owns source lifecycle independently of observers. All public lifecycle operations suspend;
@@ -42,6 +44,8 @@ class MonitoringRuntime(
     }
     private val configurations = configurations.toMap()
     private val ownership = RuntimeOwnership(commandCacheCapacity)
+    private val processing = Mutex()
+    private val writing = Mutex()
     private val job = SupervisorJob(scope.coroutineContext[Job])
     private val runtimeScope = CoroutineScope(scope.coroutineContext + job)
     private val mutableState = MutableStateFlow(MonitoringState())
@@ -54,60 +58,80 @@ class MonitoringRuntime(
     private var abnormalCount = 0
 
     suspend fun start(command: StartMonitoringCommand): StartResult {
-        val result = ownership.transition {
-            ownership.cached<StartResult>("start", command.commandId)?.let { return@transition it }
-            val current = ownership.current
-            val result = when {
-                ownership.closed || !job.isActive -> CompletableDeferred(StartResult(StartOutcome.CLOSED))
-                current?.finalizing == true -> CompletableDeferred(StartResult(
-                    if (current.finished.isCompleted) StartOutcome.FAILED else StartOutcome.INTERRUPTED, current.session,
-                ))
-                current != null && !current.started.isCompleted -> current.started
-                current != null -> CompletableDeferred(StartResult(StartOutcome.ALREADY_RUNNING, current.session))
-                else -> {
-                    val reservation = RuntimeOwnership.Reservation(RuntimeSession(sessionId(), ++ownership.generation, epochMillis()))
-                    ownership.current = reservation
-                    pairingStrategy.reset()
-                    realtime.clear()
-                    writes = MeasurementWriteBuffer(writeBatchSize)
-                    statistics = SessionStatisticsAccumulator()
-                    alarm = AlarmEvaluator(targetDiameter)
-                    pendingAlarms.clear()
-                    abnormalCount = 0
-                    mutableState.value = MonitoringState(
-                        lifecycle = MonitoringLifecycle.STARTING, activeSession = reservation.session,
-                        activeProducerCount = 1, maximumActiveProducerCount = 1,
-                    )
-                    reservation.worker = runtimeScope.launch(start = CoroutineStart.ATOMIC) { produce(reservation) }
-                    reservation.started
+        val result = withContext(NonCancellable) {
+            var candidate: RuntimeSession? = null
+            var result: CompletableDeferred<StartResult>? = null
+            while (result == null) {
+                var kickoff: RuntimeOwnership.Reservation? = null
+                result = ownership.transition {
+                    ownership.cached<StartResult>("start", command.commandId)?.let { return@transition it }
+                    val current = ownership.current
+                    val answer = when {
+                        ownership.closed || !job.isActive -> CompletableDeferred(StartResult(StartOutcome.CLOSED))
+                        current?.finalizing == true -> CompletableDeferred(StartResult(
+                            if (current.finished.isCompleted) StartOutcome.FAILED else StartOutcome.INTERRUPTED, current.session,
+                        ))
+                        current != null && !current.started.isCompleted -> current.started
+                        current != null -> CompletableDeferred(StartResult(StartOutcome.ALREADY_RUNNING, current.session))
+                        else -> {
+                            val session = candidate ?: return@transition null
+                            val reservation = RuntimeOwnership.Reservation(session.copy(generation = ++ownership.generation))
+                            ownership.current = reservation
+                            realtime.clear()
+                            writes = MeasurementWriteBuffer(writeBatchSize)
+                            statistics = SessionStatisticsAccumulator()
+                            alarm = AlarmEvaluator(targetDiameter)
+                            pendingAlarms.clear()
+                            abnormalCount = 0
+                            mutableState.value = MonitoringState(
+                                lifecycle = MonitoringLifecycle.STARTING, activeSession = reservation.session,
+                                activeProducerCount = 1, maximumActiveProducerCount = 1,
+                            )
+                            reservation.worker = runtimeScope.launch(start = CoroutineStart.ATOMIC) { produce(reservation) }
+                            kickoff = reservation
+                            reservation.started
+                        }
+                    }
+                    ownership.remember("start", command.commandId, answer)
+                    publishCacheSize()
+                    answer
                 }
+                // No injected callback can run until the reservation transition has released its lock.
+                kickoff?.launchGate?.complete(Unit)
+                if (result == null) candidate = RuntimeSession(sessionId(), 0, epochMillis())
             }
-            ownership.remember("start", command.commandId, result)
-            publishCacheSize()
             result
         }
         return result.await()
     }
 
     suspend fun stop(command: StopMonitoringCommand): StopResult = withContext(NonCancellable) {
+        var finalizer: Job? = null
         val result = ownership.transition {
             ownership.cached<StopResult>("stop", command.commandId)?.let { return@transition it }
             val result = ownership.current?.let {
                 beginFinalization(it, FinalizationReason.COMPLETED, null)
+                finalizer = it.finalizer
                 it.finished
             } ?: CompletableDeferred(StopResult())
             ownership.remember("stop", command.commandId, result)
             publishCacheSize()
             result
         }
+        finalizer?.start()
         result.await()
     }
 
     suspend fun close() = withContext(NonCancellable) {
+        var finalizer: Job? = null
         val pending = ownership.transition {
             ownership.closed = true
-            ownership.current?.also { beginFinalization(it, FinalizationReason.INTERRUPTED, null) }?.finished
+            ownership.current?.also {
+                beginFinalization(it, FinalizationReason.INTERRUPTED, null)
+                finalizer = it.finalizer
+            }?.finished
         }
+        finalizer?.start()
         val result = pending?.await()
         job.cancelAndJoin()
         check(result?.error == null) { "Runtime cleanup incomplete: ${result?.error}" }
@@ -119,6 +143,8 @@ class MonitoringRuntime(
         var failure: Throwable? = null
         try {
             withContext(NonCancellable) {
+                reservation.launchGate.await()
+                processing.withLock { pairingStrategy.reset() }
                 persistence.createSession(reservation.session)
                 reservation.created = true
             }
@@ -139,9 +165,7 @@ class MonitoringRuntime(
                 launch {
                     while (isActive) {
                         delay(flushIntervalMillis)
-                        ownership.transition {
-                            if (reservation.accepting) withContext(NonCancellable) { flushMeasurements(reservation) }
-                        }
+                        flushMeasurements(reservation)
                     }
                 }
                 source.frames.collect { accept(reservation, it) }
@@ -151,21 +175,27 @@ class MonitoringRuntime(
             failure = error
         } finally {
             withContext(NonCancellable) {
-                ownership.transition { beginFinalization(reservation, FinalizationReason.INTERRUPTED, failure) }
+                val finalizer = ownership.transition {
+                    beginFinalization(reservation, FinalizationReason.INTERRUPTED, failure)
+                    reservation.finalizer
+                }
+                finalizer?.start()
             }
         }
     }
 
     private suspend fun accept(reservation: RuntimeOwnership.Reservation, frame: CameraFrame) {
         try {
-            ownership.transition {
-                if (ownership.current !== reservation || !reservation.accepting) return@transition
+            processing.withLock {
+                val accepting = ownership.transition { ownership.current === reservation && reservation.accepting }
+                if (!accepting) return@withLock
                 val configuration = requireNotNull(configurations[frame.cameraId]) { "No configuration for ${frame.cameraId}" }
-                val camera = processor.process(frame, configuration).measurement ?: return@transition
+                val camera = processor.process(frame, configuration).measurement ?: return@withLock
                 for (pair in pairingStrategy.offer(camera)) {
                     val measurement = fusionEngine.fuseDetailed(pair.cameraA, pair.cameraB, fusionConfiguration)?.measurement ?: continue
-                    // Acceptance is atomic with queueing: cancellation cannot split bookkeeping from persistence.
-                    withContext(NonCancellable) {
+                    val flush = ownership.transition {
+                        // Revalidate after external processing; stop may have closed acceptance meanwhile.
+                        if (ownership.current !== reservation || !reservation.accepting) return@transition false
                         writes.add(measurement)
                         realtime.add(measurement)
                         statistics.add(measurement)
@@ -178,8 +208,9 @@ class MonitoringRuntime(
                             latestMeasurement = measurement, latestAlarm = evaluated.state,
                             statistics = statistics.snapshot(abnormalCount),
                         )
-                        if (writes.ready) flushMeasurements(reservation)
+                        writes.ready
                     }
+                    if (flush) flushMeasurements(reservation, thresholdOnly = true)
                 }
             }
         } finally { frame.close() }
@@ -191,26 +222,32 @@ class MonitoringRuntime(
         reservation.finalizing = true
         reservation.accepting = false
         mutableState.value = state.value.copy(lifecycle = MonitoringLifecycle.STOPPING)
-        reservation.worker.cancel()
-        // Independent non-cancellable finalizer also survives cancellation of the supplied parent scope.
-        runtimeScope.launch(NonCancellable) { finalize(reservation, reason, failure) }
+        // Lazy construction cannot execute external cleanup under the ownership lock, even Unconfined.
+        reservation.finalizer = runtimeScope.launch(NonCancellable, start = CoroutineStart.LAZY) {
+            finalize(reservation, reason, failure)
+        }
     }
 
     private suspend fun finalize(reservation: RuntimeOwnership.Reservation, reason: FinalizationReason, failure: Throwable?) {
         var error = failure?.takeUnless { it is CancellationException }?.let { it.message ?: it.toString() }
-        var stopped = false
-        try {
-            source.stop()
-            stopped = source.activeProducerCount == 0
-            if (!stopped) error = "Source still active after stop"
+        reservation.worker.cancel()
+        suspend fun stopSource(): Boolean = try {
+            source.stop(); true
         } catch (stopError: Throwable) {
-            error = stopError.message ?: "Source stop failed"
+            error = stopError.message ?: "Source stop failed"; false
         }
+        var stopped = stopSource()
         reservation.worker.join()
+        // A cancellation-insensitive start can activate after the first stop. Reconcile only
+        // once the worker can no longer start it, then retain ownership if termination fails.
+        if (source.activeProducerCount != 0) stopped = stopSource()
+        val producerCount = source.activeProducerCount
+        stopped = stopped && producerCount == 0
+        if (!stopped && error == null) error = "Source still active after stop"
         var finalized = false
         try {
             if (reservation.created) {
-                flushMeasurements(reservation)
+                flushMeasurements(reservation, drain = true)
                 if (pendingAlarms.isNotEmpty()) {
                     persistence.writeAlarms(reservation.session, pendingAlarms.toList())
                     pendingAlarms.clear()
@@ -232,15 +269,29 @@ class MonitoringRuntime(
             mutableState.value = state.value.copy(
                 lifecycle = if (error == null) MonitoringLifecycle.IDLE else MonitoringLifecycle.ERROR,
                 activeSession = if (finalized) null else reservation.session,
-                activeProducerCount = source.activeProducerCount, error = error,
+                activeProducerCount = producerCount, error = error,
             )
             reservation.started.complete(StartResult(if (error == null) StartOutcome.INTERRUPTED else StartOutcome.FAILED, reservation.session))
             reservation.finished.complete(StopResult(reservation.session, error))
         }
     }
 
-    private suspend fun flushMeasurements(reservation: RuntimeOwnership.Reservation) =
-        writes.flush { persistence.writeMeasurements(reservation.session, it) }
+    private suspend fun flushMeasurements(
+        reservation: RuntimeOwnership.Reservation,
+        thresholdOnly: Boolean = false,
+        drain: Boolean = false,
+    ) = withContext(NonCancellable) {
+        // The writer lock serializes claims, not runtime reads or measurement acceptance.
+        writing.withLock {
+            do {
+                val batch = ownership.transition {
+                    if (ownership.current !== reservation || (thresholdOnly && !writes.ready)) null else writes.claim()
+                } ?: break
+                persistence.writeMeasurements(reservation.session, batch.measurements)
+                ownership.transition { writes.acknowledge(batch) }
+            } while (drain)
+        }
+    }
 
     private fun publishCacheSize() { mutableState.value = state.value.copy(cachedCommandCount = ownership.cachedCount) }
 }

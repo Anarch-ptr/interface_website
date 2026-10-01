@@ -6,11 +6,17 @@ import com.filamentvision.core.model.OfficialMeasurement
 internal class MeasurementWriteBuffer(private val batchSize: Int = 8) {
     init { require(batchSize > 0) }
     private val pending = mutableListOf<OfficialMeasurement>()
+    class Batch(val measurements: List<OfficialMeasurement>)
+    private var claimed: Batch? = null
     val ready get() = pending.size >= batchSize
     fun add(measurement: OfficialMeasurement) { pending += measurement }
-    suspend fun flush(write: suspend (List<OfficialMeasurement>) -> Unit) {
-        if (pending.isEmpty()) return
-        write(pending.toList())
-        pending.clear()
+    fun claim(): Batch? {
+        if (claimed == null && pending.isNotEmpty()) claimed = Batch(pending.toList())
+        return claimed
+    }
+    fun acknowledge(batch: Batch) {
+        check(claimed === batch)
+        pending.subList(0, batch.measurements.size).clear()
+        claimed = null
     }
 }

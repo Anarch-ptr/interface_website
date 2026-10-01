@@ -17,7 +17,7 @@ internal class RuntimeOwnership(private val cacheCapacity: Int) {
     var closed = false
     val cachedCount get() = results.size
 
-    suspend fun <T> transition(block: suspend () -> T): T = mutex.withLock { block() }
+    suspend fun <T> transition(block: () -> T): T = mutex.withLock { block() }
 
     @Suppress("UNCHECKED_CAST")
     fun <T> cached(kind: String, id: String): CompletableDeferred<T>? =
@@ -33,6 +33,8 @@ internal class RuntimeOwnership(private val cacheCapacity: Int) {
         var finalizing = false
         var created = false
         lateinit var worker: Job
+        val launchGate = CompletableDeferred<Unit>()
+        var finalizer: Job? = null
         val started = CompletableDeferred<StartResult>()
         val finished = CompletableDeferred<StopResult>()
     }

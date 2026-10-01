@@ -21,9 +21,11 @@ internal class TestSource : ImageInputSource {
     val starts = AtomicInteger()
     override val activeProducerCount get() = active.get()
     var startGate: CompletableDeferred<Unit>? = null
+    var activateAfterCancelledStart = false
     var startFailure: Throwable? = null
     var stopFailure: Throwable? = null
     val enteredStart = CompletableDeferred<Unit>()
+    val stopCalls = AtomicInteger()
     val input = Channel<CameraFrame>(Channel.UNLIMITED)
     var lateOnStop: CameraFrame? = null
     private var downstream: FlowCollector<CameraFrame>? = null
@@ -37,6 +39,13 @@ internal class TestSource : ImageInputSource {
     }
     override suspend fun start() {
         starts.incrementAndGet()
+        if (activateAfterCancelledStart) {
+            enteredStart.complete(Unit)
+            withContext(NonCancellable) { startGate?.await() }
+            maximum.updateAndGet { maxOf(it, active.incrementAndGet()) }
+            state.value = ImageInputState.RUNNING
+            return
+        }
         maximum.updateAndGet { maxOf(it, active.incrementAndGet()) }
         state.value = ImageInputState.STARTING
         enteredStart.complete(Unit)
@@ -45,6 +54,7 @@ internal class TestSource : ImageInputSource {
         state.value = ImageInputState.RUNNING
     }
     override suspend fun stop() {
+        stopCalls.incrementAndGet()
         stopFailure?.let { throw it }
         lateOnStop?.let { downstream?.emit(it) }
         active.set(0)
@@ -53,6 +63,8 @@ internal class TestSource : ImageInputSource {
 }
 
 internal class RecordingSink : RuntimePersistence, RuntimeEventSink {
+    var onWrite: suspend (List<OfficialMeasurement>) -> Unit = {}
+    var onCreate: suspend () -> Unit = {}
     var writeFailure: Throwable? = null
     val created = mutableListOf<RuntimeSession>()
     val measurements = mutableListOf<OfficialMeasurement>()
@@ -61,8 +73,9 @@ internal class RecordingSink : RuntimePersistence, RuntimeEventSink {
     val events = mutableListOf<SessionFinalization>()
     val order = mutableListOf<String>()
     val batchSizes = mutableListOf<Int>()
-    override suspend fun createSession(session: RuntimeSession) { created += session }
+    override suspend fun createSession(session: RuntimeSession) { onCreate(); created += session }
     override suspend fun writeMeasurements(session: RuntimeSession, batch: List<OfficialMeasurement>) {
+        onWrite(batch)
         writeFailure?.let { throw it }
         order += "measurements"
         batchSizes += batch.size
@@ -82,16 +95,22 @@ internal class RecordingSink : RuntimePersistence, RuntimeEventSink {
     }
 }
 
-internal class Harness(scope: CoroutineScope, cacheCapacity: Int = 16) {
+internal class Harness(
+    scope: CoroutineScope,
+    cacheCapacity: Int = 16,
+    pairing: FramePairingStrategy = LatestCompatiblePairingStrategy(CameraId("A"), CameraId("B")),
+    epochMillis: () -> Long = { 1234L },
+    sessionId: () -> String = { java.util.UUID.randomUUID().toString() },
+) {
     val source = TestSource()
     val sink = RecordingSink()
     val runtime = MonitoringRuntime(
         scope = scope, source = source,
         configurations = mapOf(CameraId("A") to config, CameraId("B") to config),
-        pairingStrategy = LatestCompatiblePairingStrategy(CameraId("A"), CameraId("B")),
+        pairingStrategy = pairing,
         fusionConfiguration = FusionConfiguration(.25, .75, .7, 100),
         targetDiameter = .4, persistence = sink, eventSink = sink,
-        commandCacheCapacity = cacheCapacity, epochMillis = { 1234L },
+        commandCacheCapacity = cacheCapacity, epochMillis = epochMillis, sessionId = sessionId,
     )
     suspend fun send(count: Int, first: Long = 0, camera: String = "A") {
         repeat(count) { source.input.send(frame(first + it, camera)) }
