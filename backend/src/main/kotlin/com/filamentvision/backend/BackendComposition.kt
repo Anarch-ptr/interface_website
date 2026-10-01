@@ -25,6 +25,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
 
+internal data class StateCheckpoint(val monitoring: MonitoringState, val cameras: List<CameraView>,
+    val revisions: ConfigurationRevisions, val sequence: Long)
+internal data class SessionProvenance(val sessionId: String, val appliedRevision: Long?)
+
 /** Owns one source/runtime and their lifetime independently of every client. */
 class BackendComposition private constructor(
     private val database: SqliteDatabase,
@@ -51,6 +55,8 @@ class BackendComposition private constructor(
     @Volatile internal var revisions = initialRevisions
     internal val commands = Mutex()
     internal var closed = false
+    private val statePublicationLock = Any()
+    private var finalizedAwaitingState: String? = null
     val source = SimulatorImageInputSource(scope, dispatcher, epochMillis = epochMillis,
         monotonicNanos = { monotonicMillis() * 1_000_000 })
     private val tap = object : ImageInputSource by source {
@@ -73,27 +79,32 @@ class BackendComposition private constructor(
     private var measurementOrdinal = 0L
     private var alarmOrdinal = 0L
     @Volatile internal var latestPersisted: MeasurementRecord? = null
+    @Volatile internal var sessionProvenance: SessionProvenance? = null
+        private set
+    private fun publish(event: DomainEvent) = synchronized(statePublicationLock) { events.publish(event) }
     private val persistence = object : RuntimePersistence {
         override suspend fun createSession(session: RuntimeSession) {
             io { repository.createSession(session) }
             measurementOrdinal = 0; alarmOrdinal = 0; latestPersisted = null
-            events.publish(DomainEvent.SessionStarted(deviceId, session))
+            sessionProvenance = SessionProvenance(session.id, revisions.appliedRevision)
+            publish(DomainEvent.SessionStarted(deviceId, session))
         }
         override suspend fun writeMeasurements(session: RuntimeSession, batch: List<OfficialMeasurement>) {
-            val records = batch.mapIndexed { index, m -> MeasurementRecord(recordId(session.id, "m", measurementOrdinal + index), session.id, m, revisions.appliedRevision) }
+            val provenance = checkNotNull(sessionProvenance).also { check(it.sessionId == session.id) }
+            val records = batch.mapIndexed { index, m -> MeasurementRecord(recordId(session.id, "m", measurementOrdinal + index), session.id, m, provenance.appliedRevision) }
             io { repository.appendMeasurements(records) }
             measurementOrdinal += records.size
             latestPersisted = records.last()
             metrics.record(MetricCounter.DATABASE_BATCH)
             metrics.record(MetricCounter.DATABASE_ROW, records.size.toLong())
             metrics.record(MetricCounter.FUSION, records.size.toLong())
-            records.forEach { events.publish(DomainEvent.Measurement(deviceId, it)) }
+            records.forEach { publish(DomainEvent.Measurement(deviceId, it)) }
         }
         override suspend fun writeAlarms(session: RuntimeSession, batch: List<AlarmTransition>) {
             val records = batch.mapIndexed { index, t -> AlarmEventRecord(recordId(session.id, "a", alarmOrdinal + index), session.id, t) }
             io { repository.appendAlarms(records) }
             alarmOrdinal += records.size
-            records.forEach { events.publish(DomainEvent.Alarm(deviceId, it)) }
+            records.forEach { publish(DomainEvent.Alarm(deviceId, it)) }
         }
         override suspend fun finalizeSession(finalization: SessionFinalization) {
             if (finalization.error != null) {
@@ -109,19 +120,44 @@ class BackendComposition private constructor(
                         if (stored != null) repository.saveSnapshot(stored.record)
                     }
                 }
-                events.publish(DomainEvent.Error(deviceId, error))
+                publish(DomainEvent.Error(deviceId, error))
             }
             io { repository.finalizeSession(finalization) }
         }
     }
     val runtime = MonitoringRuntime(scope, tap, mapOf(a to applied.cameraA, b to applied.cameraB),
         LatestCompatiblePairingStrategy(a, b), applied.fusion, applied.targetDiameter, persistence,
-        RuntimeEventSink { events.publish(DomainEvent.SessionFinalized(deviceId, it)) }, epochMillis = epochMillis,
+        RuntimeEventSink { finalization -> synchronized(statePublicationLock) {
+            // Runtime releases its reservation only after this callback. A delayed
+            // STOPPING observer must not checkpoint past this finalization event.
+            finalizedAwaitingState = finalization.session.id
+            events.publish(DomainEvent.SessionFinalized(deviceId, finalization))
+        } }, epochMillis = epochMillis,
         realtimeCapacity = applied.realtimeCapacity, writeBatchSize = applied.writeBatchSize, flushIntervalMillis = applied.flushIntervalMillis)
+    @Volatile internal var checkpoint = StateCheckpoint(runtime.state.value, cameraViews(), revisions, 0)
+        private set
+    private fun publishState() = synchronized(statePublicationLock) {
+        // Read inside the publication boundary, never replay a collector payload
+        // that may have waited while another thread published a newer transition.
+        val state = runtime.state.value
+        if (finalizedAwaitingState != null && state.activeSession?.id == finalizedAwaitingState) return@synchronized
+        val cameras = cameraViews()
+        val sequence = events.publish(DomainEvent.State(deviceId, state, epochMillis())).sequence
+        checkpoint = StateCheckpoint(state, cameras, revisions, sequence)
+        finalizedAwaitingState = null
+    }
+    internal fun publishConfiguration(revisions: ConfigurationRevisions) = synchronized(statePublicationLock) {
+        this.revisions = revisions
+        events.publish(DomainEvent.Configuration(deviceId, revisions, epochMillis()))
+        publishState()
+    }
+    internal fun cameraViews() = listOf("A", "B").map { id -> CameraView(id, when {
+        source.scenario.value == SimulationScenario.CONNECTION_FAILURE -> CameraState.ERROR
+        source.scenario.value == SimulationScenario.CAMERA_A_ONLY && id == "B" || source.scenario.value == SimulationScenario.CAMERA_B_ONLY && id == "A" -> CameraState.UNAVAILABLE
+        else -> CameraState.AVAILABLE
+    }, true, true) }
     private val stateObserver = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-        runtime.state.map { Triple(it.lifecycle, it.activeSession, it.activeProducerCount) }.distinctUntilChanged().collect {
-            events.publish(DomainEvent.State(deviceId, runtime.state.value, epochMillis()))
-        }
+        runtime.state.collect { publishState() }
     }
     private val facade = ComposedBackendApplication(this)
     val application: BackendApplication get() = facade

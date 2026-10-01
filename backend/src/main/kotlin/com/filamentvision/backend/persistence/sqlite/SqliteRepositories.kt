@@ -76,6 +76,11 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
             connection.prepareStatement("INSERT INTO measurements (" + measurementColumns.joinToString(",") +
                 ") VALUES (" + measurementColumns.joinToString(",") { "?" } + ")").use { statement ->
                 batch.forEach { record ->
+                    val existing = connection.query("SELECT * FROM measurements WHERE id=?", listOf(record.id)) { it.measurementRecord() }.singleOrNull()
+                    if (existing != null) {
+                        if (existing != record) fail(RepositoryFailure.CONFLICT, "Measurement identity has different evidence")
+                        return@forEach
+                    }
                     val m = record.measurement
                     finite(m.fusedDiameter, m.shapeDifference, m.confidence)
                     val values = listOf(record.id, record.sessionId, m.timestamp, record.appliedRevision,
@@ -102,10 +107,7 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
             values += limit + 1
             val found = connection.query("SELECT * FROM measurements WHERE " + predicates.joinToString(" AND ") +
                 " ORDER BY timestamp,id LIMIT ?", values) { row ->
-                MeasurementRecord(row.getString("id"), row.getString("session_id"), OfficialMeasurement(
-                    row.camera("a"), row.camera("b"), row.getDouble("fused_diameter"), row.getDouble("shape_difference"),
-                    row.getDouble("confidence"), MeasurementStatus.valueOf(row.getString("status")), row.getLong("timestamp"),
-                    FusionReason.valueOf(row.getString("fusion_reason"))), row.longOrNull("applied_revision"))
+                row.measurementRecord()
             }
             val page = found.take(limit)
             MeasurementPage(page, if (found.size > limit) page.last().let { HistoryCursor(it.measurement.timestamp, it.id) } else null)
@@ -114,6 +116,11 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
     override fun appendAlarms(batch: List<AlarmEventRecord>) {
         database.access(true) { connection ->
             batch.forEach { record ->
+                val existing = connection.query("SELECT * FROM alarms WHERE id=?", listOf(record.id)) { it.alarmRecord() }.singleOrNull()
+                if (existing != null) {
+                    if (existing != record) fail(RepositoryFailure.CONFLICT, "Alarm identity has different evidence")
+                    return@forEach
+                }
                 with(record.transition) {
                     finite(fusedDiameter, from.deviationPercent, to.deviationPercent)
                     connection.update("""INSERT INTO alarms(id,session_id,timestamp,fused_diameter,from_level,from_direction,
@@ -126,8 +133,7 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
     }
     override fun alarms(sessionId: String): List<AlarmEventRecord> = database.access { connection ->
         connection.query("SELECT * FROM alarms WHERE session_id=? ORDER BY timestamp,id", listOf(sessionId)) {
-            AlarmEventRecord(it.getString("id"), it.getString("session_id"),
-                AlarmTransition(it.alarmState("from"), it.alarmState("to"), it.getLong("timestamp"), it.getDouble("fused_diameter")))
+            it.alarmRecord()
         }
     }
     override fun saveSnapshot(snapshot: SnapshotRecord) {
@@ -181,6 +187,12 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         return with(camera) { listOf(cameraId.value, pixelWidth, diameterMm, confidence, timestamp, sequence, valid,
             roiLeft, roiTop, roiRight, roiBottom, leftEdge, rightEdge, error?.name) }
     }
+    private fun ResultSet.measurementRecord() = MeasurementRecord(getString("id"), getString("session_id"), OfficialMeasurement(
+        camera("a"), camera("b"), getDouble("fused_diameter"), getDouble("shape_difference"),
+        getDouble("confidence"), MeasurementStatus.valueOf(getString("status")), getLong("timestamp"),
+        FusionReason.valueOf(getString("fusion_reason"))), longOrNull("applied_revision"))
+    private fun ResultSet.alarmRecord() = AlarmEventRecord(getString("id"), getString("session_id"),
+        AlarmTransition(alarmState("from"), alarmState("to"), getLong("timestamp"), getDouble("fused_diameter")))
     private fun ResultSet.camera(prefix: String): CameraMeasurement? {
         val id = getString(prefix + "_id") ?: return null
         fun name(field: String) = prefix + "_" + field

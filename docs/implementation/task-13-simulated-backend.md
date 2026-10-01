@@ -46,7 +46,10 @@ standalone launcher and dependency directory under `backend/build/install/`.
   The high scenario alternates 36/37 pixels, producing 1.80/1.85 mm and the
   existing immediate warning/critical classifications.
 - Measurements use stable session/ordinal IDs and the applied configuration
-  revision. Batch acknowledgement precedes reliable measurement/alarm events.
+  revision captured for that session, including latest reads spanning stop/apply.
+  Exact full-content SQLite measurement/alarm retries succeed without duplicate
+  rows; changed evidence under the same ID conflicts and rolls back the batch.
+  Batch acknowledgement precedes reliable measurement/alarm events.
   Session finalization and its event follow accepted measurement/alarm draining.
 - This composition conservatively rejects **every Apply while a runtime
   reservation exists**, including preview-only changes, with `REQUIRES_STOP`.
@@ -55,12 +58,17 @@ standalone launcher and dependency directory under `backend/build/install/`.
   stop installs it on the same runtime. This preserves buffered sample revision
   provenance; the lower-level configuration service's abstract live-update
   capability does not imply this composition has a live revision barrier.
-- Configuration and draft commands keep at most 128 completed results. Runtime
+- Start, configuration and draft commands share at most 128 completed results,
+  keyed by device/operation/command ID. Cached Start returns before revalidating
+  the current target/revision, without creating a new session. Runtime
   start/stop deduplication separately retains at most 128 results. At most two
   drafts are retained. Drafts do not change official processing.
 - Realtime retention defaults to 300. Event replay holds 256 events for this
   hub lifetime. Clients with expired cursors receive a fresh state snapshot.
-  State capture retries if the event sequence changes during capture.
+  State reads return an immutable published state/cursor checkpoint. It may lag
+  live runtime state, but its cursor cannot skip an unpublished transition or
+  a finalization whose runtime reservation has not yet been released. One owned
+  observer advances the checkpoint at state-event publication and is joined on close.
 - Preview RAW A/B slots retain two immutable pixel copies. Each of at most 32
   subscribers has at most one pending copy per subscribed key; payloads are
   shared. Preview loss never changes reliable measurement persistence.

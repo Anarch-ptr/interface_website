@@ -33,14 +33,6 @@ fun Application.installBackend(composition: BackendComposition) {
     installPreviewWebSocket(composition.previews, composition.previewKeys, PngPreviewEncoder(),
         maximumFramesPerSecond = { composition.applied.previewFramesPerSecond })
 }
-internal fun <T> coherentSnapshot(sequence: () -> Long, read: () -> T): Pair<T, Long> {
-    while (true) {
-        val before = sequence()
-        val value = read()
-        if (before == sequence()) return value to before
-    }
-}
-
 fun main(args: Array<String>) = runBlocking {
     val options = parseBackendOptions(args)
     val composition = BackendComposition.open(options.database, options.snapshotRoot)

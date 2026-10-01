@@ -71,6 +71,29 @@ abstract class RepositoryConformance {
         assertEquals(second, r.measurements.history("s", first.nextCursor, 2))
         fails(RepositoryFailure.INVALID) { r.measurements.history("s", limit = 0) }
     }
+    @Test fun exactMeasurementAndAlarmRetriesAreIdempotentButChangedEvidenceConflicts() {
+        r.sessions.createSession(session)
+        r.configurations.saveConfiguration(configuration)
+        val original = measurement("m", 10).copy(appliedRevision = 1)
+        r.measurements.appendMeasurements(listOf(original))
+        r.measurements.appendMeasurements(listOf(original, original))
+        assertEquals(listOf(original), r.measurements.history("s").items)
+        val changes = listOf(original.copy(appliedRevision = 2), original.copy(sessionId = "other"),
+            original.copy(measurement = original.measurement.copy(cameraA = original.measurement.cameraA!!.copy(sequence = 99))),
+            original.copy(measurement = original.measurement.copy(confidence = .5)))
+        changes.forEach { changed -> fails(RepositoryFailure.CONFLICT) {
+            r.measurements.appendMeasurements(listOf(measurement("new", 20), changed))
+        } }
+        assertEquals(listOf(original), r.measurements.history("s").items)
+        r.alarms.appendAlarms(listOf(alarm))
+        r.alarms.appendAlarms(listOf(alarm, alarm))
+        assertEquals(listOf(alarm), r.alarms.alarms("s"))
+        for (changed in listOf(alarm.copy(sessionId = "other"), alarm.copy(transition = alarm.transition.copy(fusedDiameter = 1.9)),
+            alarm.copy(transition = alarm.transition.copy(to = alarm.transition.to.copy(deviationPercent = 9.0))))) {
+            fails(RepositoryFailure.CONFLICT) { r.alarms.appendAlarms(listOf(alarm.copy(id = "new"), changed)) }
+        }
+        assertEquals(listOf(alarm), r.alarms.alarms("s"))
+    }
     @Test fun alarmsEnforceSessionForeignKeyAndRetainTransitionEvidence() {
         fails(RepositoryFailure.INVALID) { r.alarms.appendAlarms(listOf(alarm)) }
         r.sessions.createSession(session)

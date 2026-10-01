@@ -39,8 +39,11 @@ private class InMemoryRepositories : SessionRepository, MeasurementRepository, A
     override fun appendMeasurements(batch: List<MeasurementRecord>) {
         val staged = measurements.toMutableMap()
         batch.forEach {
+            if (it.id in staged) {
+                if (staged[it.id] != it) fail(RepositoryFailure.CONFLICT)
+                return@forEach
+            }
             requireSession(it.sessionId)
-            if (it.id in staged) fail(RepositoryFailure.CONFLICT)
             if (!it.measurement.confidence.isFinite()) fail(RepositoryFailure.INVALID)
             staged[it.id] = it
         }
@@ -58,8 +61,11 @@ private class InMemoryRepositories : SessionRepository, MeasurementRepository, A
     override fun appendAlarms(batch: List<AlarmEventRecord>) {
         val staged = alarms.toMutableMap()
         batch.forEach {
+            if (it.id in staged) {
+                if (staged[it.id] != it) fail(RepositoryFailure.CONFLICT)
+                return@forEach
+            }
             requireSession(it.sessionId)
-            if (it.id in staged) fail(RepositoryFailure.CONFLICT)
             staged[it.id] = it
         }
         alarms.clear(); alarms.putAll(staged)

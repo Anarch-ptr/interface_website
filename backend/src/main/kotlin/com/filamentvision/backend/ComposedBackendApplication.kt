@@ -1,9 +1,7 @@
 package com.filamentvision.backend
 
 import com.filamentvision.backend.application.*
-import com.filamentvision.backend.simulator.SimulationScenario
 import com.filamentvision.core.config.*
-import com.filamentvision.core.event.DomainEvent
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
 import kotlinx.coroutines.sync.withLock
@@ -12,7 +10,7 @@ import kotlinx.coroutines.withContext
 import java.util.UUID
 
 internal class ComposedBackendApplication(private val c: BackendComposition) : BackendApplication {
-    private val results = linkedMapOf<Pair<String, String>, Any>()
+    private val results = linkedMapOf<Triple<String, String, String>, Any>()
     private val drafts = linkedMapOf<String, DraftView>()
     val cachedCommandCount get() = results.size
     private val service = ConfigurationService(c.repository, object : ConfigurationRuntime {
@@ -30,29 +28,35 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
     private fun conflict(): Nothing = throw ApplicationFailure(ApplicationFailureCode.CONFLICT)
     private suspend fun <T : Any> dedup(kind: String, id: String, action: suspend () -> T): T = withContext(NonCancellable) { c.commands.withLock {
         check(!c.closed)
+        val key = Triple(c.deviceId, kind, id)
         @Suppress("UNCHECKED_CAST")
-        (results[kind to id] as T?)?.let { return@withLock it }
-        action().also { results[kind to id] = it; while (results.size > 128) results.remove(results.keys.first()) }
+        (results[key] as T?)?.let { return@withLock it }
+        action().also { results[key] = it; while (results.size > 128) results.remove(results.keys.first()) }
     } }
     override suspend fun state(deviceId: String): DeviceView {
         device(deviceId)
-        val (value, sequence) = coherentSnapshot({ c.events.metrics(deviceId).published }) { c.runtime.state.value to c.revisions }
-        return DeviceView(deviceId, if (value.first.lifecycle == MonitoringLifecycle.ERROR) ConnectionState.ERROR else ConnectionState.CONNECTED,
-            value.first, cameras(deviceId), value.second, sequence)
+        val value = c.checkpoint
+        return DeviceView(deviceId, if (value.monitoring.lifecycle == MonitoringLifecycle.ERROR) ConnectionState.ERROR else ConnectionState.CONNECTED,
+            value.monitoring, value.cameras, value.revisions, value.sequence)
     }
-    override suspend fun start(deviceId: String, commandId: String, targetDiameter: Double?, appliedRevision: Long?): StartResult = c.commands.withLock {
-        device(deviceId); check(!c.closed)
-        if (targetDiameter != null && targetDiameter != c.applied.targetDiameter || appliedRevision != null && appliedRevision != c.revisions.appliedRevision) conflict()
-        c.runtime.start(StartMonitoringCommand(commandId))
+    override suspend fun start(deviceId: String, commandId: String, targetDiameter: Double?, appliedRevision: Long?): StartResult {
+        device(deviceId)
+        return dedup("start", commandId) {
+            if (targetDiameter != null && targetDiameter != c.applied.targetDiameter || appliedRevision != null && appliedRevision != c.revisions.appliedRevision) conflict()
+            c.runtime.start(StartMonitoringCommand(commandId))
+        }
     }
     override suspend fun stop(deviceId: String, commandId: String): StopResult = c.commands.withLock {
         device(deviceId); c.runtime.stop(StopMonitoringCommand(commandId))
     }
     override suspend fun latest(deviceId: String): MeasurementRecord? {
-        device(deviceId); val s = c.runtime.state.value
+        device(deviceId)
+        val provenance = c.sessionProvenance
+        val s = c.runtime.state.value
         val m = s.latestMeasurement ?: return null
         val session = s.activeSession?.id ?: return c.latestPersisted
-        return MeasurementRecord(c.recordId(session, "m", s.statistics.sampleCount - 1), session, m, c.revisions.appliedRevision)
+        if (session != provenance?.sessionId) return c.latestPersisted
+        return MeasurementRecord(c.recordId(session, "m", s.statistics.sampleCount - 1), session, m, provenance.appliedRevision)
     }
     override suspend fun sessions(query: PageQuery): SessionPage = c.io {
         val rows = c.repository.sessions(query.after, query.limit + 1, query.from, query.through)
@@ -72,8 +76,7 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
         if (result?.outcome == ConfigurationApplyOutcome.APPLIED && c.runtime.state.value.activeSession == null)
             check(c.runtime.configureWhenStopped(c.applied, c.a, c.b))
         val resultView = c.io { view(result?.outcome) }
-        c.revisions = resultView.revisions
-        c.events.publish(DomainEvent.Configuration(c.deviceId, resultView.revisions, c.epochMillis()))
+        c.publishConfiguration(resultView.revisions)
         return resultView
     }
     override suspend fun save(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView {
@@ -105,11 +108,7 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
     }
     override suspend fun cameras(deviceId: String): List<CameraView> {
         device(deviceId)
-        return listOf("A", "B").map { id -> CameraView(id, when {
-            c.source.scenario.value == SimulationScenario.CONNECTION_FAILURE -> CameraState.ERROR
-            c.source.scenario.value == SimulationScenario.CAMERA_A_ONLY && id == "B" || c.source.scenario.value == SimulationScenario.CAMERA_B_ONLY && id == "A" -> CameraState.UNAVAILABLE
-            else -> CameraState.AVAILABLE
-        }, true, true) }
+        return c.cameraViews()
     }
     override suspend fun diagnostics(deviceId: String): DiagnosticsView {
         device(deviceId); val cache = c.snapshotCache.state()

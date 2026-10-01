@@ -3,8 +3,6 @@ package com.filamentvision.backend.e2e
 import com.filamentvision.backend.*
 import com.filamentvision.backend.api.apiJson
 import com.filamentvision.backend.simulator.SimulationScenario
-import com.filamentvision.core.event.*
-import com.filamentvision.core.runtime.MonitoringState
 import io.ktor.client.plugins.websocket.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -61,16 +59,6 @@ class BackendTransportTest {
                 close()
             }
         } finally { c.close() }
-    }
-    @Test fun publicationDuringCaptureCannotAdvanceCursorPastStaleState() {
-        val hub = SequencedEventHub(setOf("simulator-1"), 4)
-        var state = 0; var first = true
-        val captured = coherentSnapshot({ hub.metrics("simulator-1").published }) {
-            val old = state
-            if (first) { first = false; state = 1; hub.publish(DomainEvent.State("simulator-1", MonitoringState(), 1)) }
-            old
-        }
-        assertEquals(1 to 1L, captured)
     }
     @Test fun executableOptionsAreBoundedAndDefaultToLoopbackProjectBuild() {
         val options = parseBackendOptions(emptyArray())
