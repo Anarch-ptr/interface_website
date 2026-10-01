@@ -72,11 +72,14 @@ while frame scheduling remains under virtual time.
 
 The frame stream is a work-sharing ingress for the future runtime, not a
 broadcast bus: collectors compete for frames and never start or stop the source.
-Each collector owns a successfully emitted frame and closes it after use. If
-`emit` throws or is cancelled, the source closes the removed frame, counts one
-drop and rethrows; lease idempotence protects a frame already closed downstream.
-A collector must finish using an interrupted emission's frame before unwinding,
-and must not retain it after collection fails or short-circuits. Future preview
+Downstream acceptance transfers ownership to the collector, which closes the
+frame after use. An active-context short-circuit (including `first()`/`take()`)
+or downstream exception preserves that ownership and does not count a drop.
+In particular, `first()` returns an open lease for its caller to close. If the
+collection context is inactive when `emit` throws, the source closes the removed
+frame, counts one drop and rethrows. Lease idempotence protects a frame already
+closed downstream. A cancelled collector must finish using that interrupted
+emission's frame before unwinding and must not retain it afterwards. Future preview
 fanout belongs downstream of that owner. There is one pending frame per camera
 (at most two images), plus one conflated wake-up signal. Replacement closes
 the old image and increments `droppedFrames`. Stop/failure also close and count

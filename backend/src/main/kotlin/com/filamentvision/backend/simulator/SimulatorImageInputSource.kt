@@ -13,8 +13,8 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Explicitly owned producer. [frames] is a work-sharing ingress, not a broadcast:
- * a successful emission transfers ownership to the collector, which must close it.
- * If emission fails or is cancelled, the source closes and counts the frame as dropped.
+ * downstream acceptance transfers ownership, including active-context short-circuiting.
+ * An interrupted emission in a cancelled collection context is closed and counted as dropped.
  * At most one pending frame per camera is retained; observers do not own lifecycle.
  */
 @OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
@@ -64,10 +64,12 @@ class SimulatorImageInputSource(
                 try {
                     emit(next)
                 } catch (error: Throwable) {
-                    // The removed frame is no longer reachable by mailbox cleanup.
-                    // Close is idempotent if the collector already released its lease.
-                    next.close()
-                    mutableDiagnostics.update { it.copy(droppedFrames = it.droppedFrames + 1) }
+                    // first()/take() short-circuit in an active context after accepting ownership.
+                    // Only cancelled collection leaves an undelivered frame outside mailbox cleanup.
+                    if (!currentCoroutineContext().isActive) {
+                        next.close()
+                        mutableDiagnostics.update { it.copy(droppedFrames = it.droppedFrames + 1) }
+                    }
                     throw error
                 }
             }

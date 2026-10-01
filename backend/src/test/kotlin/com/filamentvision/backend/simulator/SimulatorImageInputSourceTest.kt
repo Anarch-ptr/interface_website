@@ -6,6 +6,7 @@ import com.filamentvision.core.frame.FrameLease
 import com.filamentvision.core.input.ImageInputState
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -54,6 +55,24 @@ class SimulatorImageInputSourceTest {
         assertEquals(2L, source.diagnostics.value.droppedFrames)
     }
 
+    // first() accepts a frame before its active-context short-circuit; the returned lease belongs to the caller.
+    @Test fun firstTransfersAnOpenLeaseUntilTheCallerClosesIt() = runTest {
+        val releases = mutableListOf<Int>()
+        val source = source(trackingFactory(releases))
+        source.setScenario(SimulationScenario.CAMERA_A_ONLY)
+        source.start(); runCurrent()
+        val frame = source.frames.first()
+        assertEquals(CameraId("left"), frame.cameraId)
+        assertEquals(0L, frame.sequence)
+        assertEquals(listOf(0), releases)
+        assertEquals(0L, source.diagnostics.value.droppedFrames)
+        source.stop()
+        assertEquals(listOf(0), releases)
+        frame.close(); frame.close()
+        assertEquals(listOf(1), releases)
+        assertEquals(0L, source.diagnostics.value.droppedFrames)
+    }
+
     // A cancelled emit has already removed the frame from the mailbox; source cleanup must still release it.
     @Test fun cancelledHandoffReleasesRemovedLeaseAndCountsOneDrop() = runTest {
         val releases = mutableListOf<Int>()
@@ -76,8 +95,8 @@ class SimulatorImageInputSourceTest {
         assertEquals(1L, source.diagnostics.value.droppedFrames)
     }
 
-    // A downstream failure must propagate unchanged while cleanup remains safe if downstream already closed.
-    @Test fun throwingHandoffCountsDropAndDoesNotReleaseLeaseTwice() = runTest {
+    // An active downstream failure happens after acceptance; the collector retains ownership and no drop is counted.
+    @Test fun activeDownstreamFailurePreservesAcceptedOwnershipAndPropagates() = runTest {
         val releases = mutableListOf<Int>()
         val source = source(trackingFactory(releases))
         source.setScenario(SimulationScenario.CAMERA_A_ONLY)
@@ -94,10 +113,10 @@ class SimulatorImageInputSourceTest {
         collector.join()
         assertSame(failure, observed.await())
         assertEquals(listOf(1), releases)
-        assertEquals(1L, source.diagnostics.value.droppedFrames)
+        assertEquals(0L, source.diagnostics.value.droppedFrames)
         source.stop()
         assertEquals(listOf(1), releases)
-        assertEquals(1L, source.diagnostics.value.droppedFrames)
+        assertEquals(0L, source.diagnostics.value.droppedFrames)
     }
 
     // Removing the start mutex would create multiple jobs; removing join/queue clearing leaks frames after stop.
