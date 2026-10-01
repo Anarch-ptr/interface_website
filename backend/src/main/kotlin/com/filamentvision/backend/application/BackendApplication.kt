@@ -11,6 +11,10 @@ import com.filamentvision.core.runtime.*
  * operation and commandId, including drafts/configuration. Implementations must not expose secrets.
  */
 interface BackendApplication {
+    /** Capture state and eventSequence at one authoritative boundary in the event hub's
+     * lifetime. WebSocket snapshot/resume relies on this coherent pair; sampling the
+     * sequence independently after reading runtime state can skip intervening events.
+     */
     suspend fun state(deviceId: String): DeviceView
     suspend fun start(deviceId: String, commandId: String, targetDiameter: Double?, appliedRevision: Long?): StartResult
     suspend fun stop(deviceId: String, commandId: String): StopResult
