@@ -49,6 +49,8 @@ standalone launcher and dependency directory under `backend/build/install/`.
   revision captured for that session, including latest reads spanning stop/apply.
   Exact full-content SQLite measurement/alarm retries succeed without duplicate
   rows; changed evidence under the same ID conflicts and rolls back the batch.
+  Duplicate comparison treats signed zeros as storage-equivalent because SQLite
+  REAL normalizes them; every nonzero finite value still requires exact equality.
   Batch acknowledgement precedes reliable measurement/alarm events.
   Session finalization and its event follow accepted measurement/alarm draining.
 - This composition conservatively rejects **every Apply while a runtime

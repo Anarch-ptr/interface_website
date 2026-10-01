@@ -22,6 +22,56 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
     }
     @After fun close() { database.close() }
 
+    @Test fun measurementRetryTreatsSignedZerosAsStorageEquivalentButNoOtherDifference() {
+        r.sessions.createSession(session)
+        val template = measurement("signed-zero", 10)
+        val zero = template.measurement.copy(fusedDiameter = -0.0, shapeDifference = -0.0, confidence = -0.0,
+            cameraA = template.measurement.cameraA!!.copy(pixelWidth = -0.0, diameterMm = -0.0, confidence = -0.0),
+            cameraB = template.measurement.cameraB!!.copy(pixelWidth = -0.0, diameterMm = -0.0, confidence = -0.0))
+        val record = template.copy(measurement = zero)
+        r.measurements.appendMeasurements(listOf(record))
+        val stored = r.measurements.history("s").items.single()
+        with(stored.measurement) {
+            listOf(fusedDiameter, shapeDifference, confidence, cameraA!!.pixelWidth, cameraA!!.diameterMm,
+                cameraA!!.confidence, cameraB!!.pixelWidth, cameraB!!.diameterMm, cameraB!!.confidence)
+                .forEach { assertEquals("SQLite stores positive zero", 0L, it.toBits()) }
+        }
+        r.measurements.appendMeasurements(listOf(record, stored, record))
+        val smallest = Double.MIN_VALUE
+        val changed = listOf(zero.copy(fusedDiameter = smallest), zero.copy(shapeDifference = smallest), zero.copy(confidence = smallest),
+            zero.copy(cameraA = zero.cameraA!!.copy(pixelWidth = smallest)), zero.copy(cameraA = zero.cameraA!!.copy(diameterMm = smallest)),
+            zero.copy(cameraA = zero.cameraA!!.copy(confidence = smallest)), zero.copy(cameraB = zero.cameraB!!.copy(pixelWidth = smallest)),
+            zero.copy(cameraB = zero.cameraB!!.copy(diameterMm = smallest)), zero.copy(cameraB = zero.cameraB!!.copy(confidence = smallest)))
+        changed.forEachIndexed { i, m -> fails(RepositoryFailure.CONFLICT) {
+            r.measurements.appendMeasurements(listOf(measurement("new-$i", 20), record.copy(measurement = m)))
+        } }
+        assertEquals(listOf(stored), r.measurements.history("s").items)
+        val nonzero = measurement("nonzero", 30)
+        r.measurements.appendMeasurements(listOf(nonzero))
+        fails(RepositoryFailure.CONFLICT) { r.measurements.appendMeasurements(listOf(nonzero.copy(
+            measurement = nonzero.measurement.copy(fusedDiameter = Math.nextUp(nonzero.measurement.fusedDiameter))))) }
+    }
+
+    @Test fun alarmRetryTreatsSignedZerosAsStorageEquivalentButNoOtherDifference() {
+        r.sessions.createSession(session)
+        val zero = alarm.transition.copy(fusedDiameter = -0.0,
+            from = alarm.transition.from.copy(deviationPercent = -0.0), to = alarm.transition.to.copy(deviationPercent = -0.0))
+        val record = alarm.copy(transition = zero)
+        r.alarms.appendAlarms(listOf(record))
+        val stored = r.alarms.alarms("s").single()
+        with(stored.transition) { listOf(fusedDiameter, from.deviationPercent, to.deviationPercent).forEach { assertEquals(0L, it.toBits()) } }
+        r.alarms.appendAlarms(listOf(record, stored, record))
+        listOf(zero.copy(fusedDiameter = Double.MIN_VALUE), zero.copy(from = zero.from.copy(deviationPercent = Double.MIN_VALUE)),
+            zero.copy(to = zero.to.copy(deviationPercent = Double.MIN_VALUE))).forEachIndexed { i, changed ->
+            fails(RepositoryFailure.CONFLICT) { r.alarms.appendAlarms(listOf(alarm.copy(id = "new-$i"), record.copy(transition = changed))) }
+        }
+        assertEquals(listOf(stored), r.alarms.alarms("s"))
+        val nonzero = alarm.copy(id = "nonzero")
+        r.alarms.appendAlarms(listOf(nonzero))
+        fails(RepositoryFailure.CONFLICT) { r.alarms.appendAlarms(listOf(nonzero.copy(
+            transition = nonzero.transition.copy(fusedDiameter = Math.nextUp(nonzero.transition.fusedDiameter))))) }
+    }
+
     @Test fun closeAndReopenRetainsSessionsHistoryAlarmsAndBothConfigurationRevisions() {
         r.sessions.createSession(session)
         r.measurements.appendMeasurements(listOf(measurement("m", 10)))

@@ -78,7 +78,7 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
                 batch.forEach { record ->
                     val existing = connection.query("SELECT * FROM measurements WHERE id=?", listOf(record.id)) { it.measurementRecord() }.singleOrNull()
                     if (existing != null) {
-                        if (existing != record) fail(RepositoryFailure.CONFLICT, "Measurement identity has different evidence")
+                        if (existing.canonicalZeros() != record.canonicalZeros()) fail(RepositoryFailure.CONFLICT, "Measurement identity has different evidence")
                         return@forEach
                     }
                     val m = record.measurement
@@ -118,7 +118,7 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
             batch.forEach { record ->
                 val existing = connection.query("SELECT * FROM alarms WHERE id=?", listOf(record.id)) { it.alarmRecord() }.singleOrNull()
                 if (existing != null) {
-                    if (existing != record) fail(RepositoryFailure.CONFLICT, "Alarm identity has different evidence")
+                    if (existing.canonicalZeros() != record.canonicalZeros()) fail(RepositoryFailure.CONFLICT, "Alarm identity has different evidence")
                     return@forEach
                 }
                 with(record.transition) {
@@ -191,6 +191,19 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         camera("a"), camera("b"), getDouble("fused_diameter"), getDouble("shape_difference"),
         getDouble("confidence"), MeasurementStatus.valueOf(getString("status")), getLong("timestamp"),
         FusionReason.valueOf(getString("fusion_reason"))), longOrNull("applied_revision"))
+    // SQLite REAL normalizes -0.0 to +0.0. Reconcile only that representation
+    // difference; every nonzero finite value and every other field stays exact.
+    private fun canonicalZero(value: Double) = if (value == 0.0) 0.0 else value
+    private fun CameraMeasurement.canonicalZeros() = copy(pixelWidth = canonicalZero(pixelWidth),
+        diameterMm = canonicalZero(diameterMm), confidence = canonicalZero(confidence))
+    private fun MeasurementRecord.canonicalZeros() = copy(measurement = measurement.copy(
+        cameraA = measurement.cameraA?.canonicalZeros(), cameraB = measurement.cameraB?.canonicalZeros(),
+        fusedDiameter = canonicalZero(measurement.fusedDiameter), shapeDifference = canonicalZero(measurement.shapeDifference),
+        confidence = canonicalZero(measurement.confidence)))
+    private fun AlarmEventRecord.canonicalZeros() = copy(transition = transition.copy(
+        fusedDiameter = canonicalZero(transition.fusedDiameter),
+        from = transition.from.copy(deviationPercent = canonicalZero(transition.from.deviationPercent)),
+        to = transition.to.copy(deviationPercent = canonicalZero(transition.to.deviationPercent))))
     private fun ResultSet.alarmRecord() = AlarmEventRecord(getString("id"), getString("session_id"),
         AlarmTransition(alarmState("from"), alarmState("to"), getLong("timestamp"), getDouble("fused_diameter")))
     private fun ResultSet.camera(prefix: String): CameraMeasurement? {
