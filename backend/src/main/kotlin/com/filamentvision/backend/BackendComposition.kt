@@ -11,6 +11,7 @@ import com.filamentvision.core.event.*
 import com.filamentvision.core.frame.*
 import com.filamentvision.core.fusion.LatestCompatiblePairingStrategy
 import com.filamentvision.core.input.ImageInputSource
+import com.filamentvision.core.input.CameraInput
 import com.filamentvision.core.metrics.*
 import com.filamentvision.core.model.OfficialMeasurement
 import com.filamentvision.core.preview.*
@@ -75,6 +76,7 @@ class BackendComposition private constructor(
                 metrics.latency(MetricLatency.PROCESSING, (monotonicMillis() - started).coerceAtLeast(0).toDouble())
             }
         }
+        override val inputs = frames.map(CameraInput::Image)
     }
     private var measurementOrdinal = 0L
     private var alarmOrdinal = 0L

@@ -25,8 +25,11 @@ data class CameraMeasurement(
     val rightEdge: Int? = null,
     val error: DetectionError? = null,
     val source: CameraMeasurementSource = CameraMeasurementSource.VISION,
-    val receivedAtMonotonicNanos: Long = timestamp * 1_000_000,
-)
+) {
+    /** Pairing-only process provenance; intentionally excluded from persisted evidence equality. */
+    var receivedAtMonotonicNanos: Long = timestamp * 1_000_000
+        internal set
+}
 
 class DetectionPipeline {
     fun detect(
@@ -72,8 +75,7 @@ class DetectionPipeline {
             frame.capturedAtEpochMillis, frame.sequence, valid,
             calibration.roiLeft, calibration.roiTop, calibration.roiRight, calibration.roiBottom,
             left, right, if (valid) null else DetectionError.LOW_CONFIDENCE,
-            receivedAtMonotonicNanos = frame.receivedAtMonotonicNanos,
-        )
+        ).also { it.receivedAtMonotonicNanos = frame.receivedAtMonotonicNanos }
     }
 
     private fun detectRow(threshold: IntensityFrame, edges: IntensityFrame, y: Int, calibration: CalibrationProfile): RowDetection? {
@@ -105,8 +107,7 @@ class DetectionPipeline {
         frame.cameraId, 0.0, 0.0, 0.0, frame.capturedAtEpochMillis, frame.sequence, false,
         calibration.roiLeft, calibration.roiTop, calibration.roiRight, calibration.roiBottom,
         error = error,
-        receivedAtMonotonicNanos = frame.receivedAtMonotonicNanos,
-    )
+    ).also { it.receivedAtMonotonicNanos = frame.receivedAtMonotonicNanos }
 
     private fun median(values: List<Double>): Double = if (values.size % 2 == 1) values[values.size / 2]
     else (values[values.size / 2 - 1] + values[values.size / 2]) / 2.0

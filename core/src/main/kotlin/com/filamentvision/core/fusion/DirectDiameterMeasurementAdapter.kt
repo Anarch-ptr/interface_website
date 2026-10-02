@@ -22,7 +22,6 @@ object DirectDiameterMeasurementAdapter {
             sequence = evidence.sequence,
             valid = true,
             source = CameraMeasurementSource.DIRECT_DIAMETER,
-            receivedAtMonotonicNanos = evidence.receivedAtMonotonicNanos,
-        )
+        ).also { it.receivedAtMonotonicNanos = evidence.receivedAtMonotonicNanos }
     }
 }

@@ -31,6 +31,9 @@ class BorrowedPayloadView internal constructor(
     }
 
     fun copyOwned(): ByteArray = bytes.copyOfRange(offset, offset + length)
+
+    fun <T> withBytes(block: (bytes: ByteArray, offset: Int, length: Int) -> T): T =
+        block(bytes, offset, length)
 }
 
 data class ParsedTransportDatagram(
