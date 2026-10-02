@@ -4,6 +4,7 @@ import com.filamentvision.core.frame.CameraId
 import com.filamentvision.core.model.FusionConfiguration
 import com.filamentvision.core.model.MeasurementStatus
 import com.filamentvision.core.vision.CameraMeasurement
+import com.filamentvision.core.vision.CameraMeasurementSource
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -30,6 +31,8 @@ class FusionGoldenTest {
         assertTrue(result.timestampsCompatible)
         assertEquals(FusionReason.BOTH_CAMERAS, result.reason)
         assertEquals(result.reason, result.measurement.fusionReason)
+        assertEquals(CameraMeasurementSource.VISION, result.measurement.cameraA!!.source)
+        assertEquals(170.0, result.measurement.cameraA!!.pixelWidth!!, 0.0)
     }
 
     @Test fun missingSidesProjectToTheFrozenLegacyAbsenceValues() {

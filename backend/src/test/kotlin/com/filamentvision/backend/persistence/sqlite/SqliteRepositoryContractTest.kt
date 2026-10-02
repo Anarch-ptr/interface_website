@@ -34,6 +34,7 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
         with(stored.measurement) {
             listOf(fusedDiameter, shapeDifference, confidence, cameraA!!.pixelWidth, cameraA!!.diameterMm,
                 cameraA!!.confidence, cameraB!!.pixelWidth, cameraB!!.diameterMm, cameraB!!.confidence)
+                .map(::requireNotNull)
                 .forEach { assertEquals("SQLite stores positive zero", 0L, it.toBits()) }
         }
         r.measurements.appendMeasurements(listOf(record, stored, record))

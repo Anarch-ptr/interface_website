@@ -12,7 +12,7 @@ import com.filamentvision.core.vision.CameraMeasurement
 import io.ktor.http.encodeURLPathPart
 
 private fun Double.safe(): Double? = takeIf { isFinite() }
-fun CameraMeasurement.toDto() = CameraMeasurementDto(cameraId.value, timestamp, sequence, pixelWidth.safe(), diameterMm.safe(), confidence.safe(), valid)
+fun CameraMeasurement.toDto() = CameraMeasurementDto(cameraId.value, timestamp, sequence, pixelWidth?.safe(), diameterMm.safe(), confidence.safe(), valid, source.name)
 fun OfficialMeasurement.toDto() = MeasurementDto(cameraA?.toDto(), cameraB?.toDto(), cameraA?.diameterMm?.safe(), cameraB?.diameterMm?.safe(),
     fusedDiameter.safe(), shapeDifference.safe(), confidence.safe(), status.name, fusionReason.name, timestamp)
 fun MeasurementRecord.toDto() = MeasurementRecordDto(id, sessionId, appliedRevision, measurement.toDto())

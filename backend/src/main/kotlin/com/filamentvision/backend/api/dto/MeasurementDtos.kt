@@ -1,7 +1,7 @@
 package com.filamentvision.backend.api.dto
 
 data class CameraMeasurementDto(val cameraId: String, val timestamp: Long, val sequence: Long,
-    val pixelWidth: Double?, val diameterMm: Double?, val confidence: Double?, val valid: Boolean)
+    val pixelWidth: Double?, val diameterMm: Double?, val confidence: Double?, val valid: Boolean, val source: String)
 data class MeasurementDto(val cameraA: CameraMeasurementDto?, val cameraB: CameraMeasurementDto?,
     val diameterA: Double?, val diameterB: Double?, val fusedDiameter: Double?, val shapeDifference: Double?,
     val confidence: Double?, val status: String, val fusionReason: String, val timestamp: Long)

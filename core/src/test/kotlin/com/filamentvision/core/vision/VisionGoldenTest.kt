@@ -37,7 +37,7 @@ class VisionGoldenTest {
         assertEquals(CameraId("A"), measurement.cameraId)
         assertEquals(99L, measurement.timestamp)
         assertEquals(3L, measurement.sequence)
-        assertEquals(double("expectedPixelWidth"), measurement.pixelWidth, 0.0)
+        assertEquals(double("expectedPixelWidth"), requireNotNull(measurement.pixelWidth), 0.0)
         assertEquals(double("expectedDiameterMm"), measurement.diameterMm, 0.0)
         assertEquals(double("expectedConfidence"), measurement.confidence, 0.0)
         assertTrue(measurement.valid)
@@ -56,7 +56,7 @@ class VisionGoldenTest {
             configuration().copy(calibration = calibration().copy(thresholdMode = ThresholdMode.AUTOMATIC)),
         )
         assertEquals(21, result.effectiveThreshold)
-        assertEquals(4.0, requireNotNull(result.measurement).pixelWidth, 0.0)
+        assertEquals(4.0, requireNotNull(requireNotNull(result.measurement).pixelWidth), 0.0)
         assertNull(result.error)
     }
 

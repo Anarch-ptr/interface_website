@@ -7,10 +7,11 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 enum class DetectionError { INVALID_CALIBRATION, INVALID_ROI, NO_EDGES, WIDTH_OUT_OF_RANGE, LOW_CONFIDENCE }
+enum class CameraMeasurementSource { VISION, DIRECT_DIAMETER }
 
 data class CameraMeasurement(
     val cameraId: CameraId,
-    val pixelWidth: Double,
+    val pixelWidth: Double?,
     val diameterMm: Double,
     val confidence: Double,
     val timestamp: Long,
@@ -23,6 +24,7 @@ data class CameraMeasurement(
     val leftEdge: Int? = null,
     val rightEdge: Int? = null,
     val error: DetectionError? = null,
+    val source: CameraMeasurementSource = CameraMeasurementSource.VISION,
 )
 
 class DetectionPipeline {

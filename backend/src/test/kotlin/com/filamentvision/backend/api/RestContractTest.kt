@@ -29,6 +29,7 @@ class RestContractTest {
             assertEquals("A", measurement["cameraA"]["cameraId"].asText())
             assertEquals(1001, measurement["cameraA"]["timestamp"].asLong())
             assertEquals(7, measurement["cameraA"]["sequence"].asLong())
+            assertEquals("VISION", measurement["cameraA"]["source"].asText())
             assertEquals(0.95, measurement["cameraA"]["confidence"].asDouble(), 0.0)
             assertTrue(measurement["cameraA"]["valid"].asBoolean())
             assertEquals(1.8, measurement["fusedDiameter"].asDouble(), 0.0)
