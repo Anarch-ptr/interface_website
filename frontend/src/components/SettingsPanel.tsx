@@ -4,8 +4,10 @@ import { DEFAULT_MONITORING_CONFIGURATION, validateMonitoringConfiguration } fro
 import type { MonitoringConfiguration } from '../domain/monitoring'
 import type { MonitoringStore } from '../state/MonitoringStore'
 import { useMonitoringConfiguration } from '../state/useMonitoringStore'
+import type { BackendApiClient } from '../services/BackendApiClient'
+import { UdpInputSettings } from './UdpInputSettings'
 
-export function SettingsPanel({ store }: { store: MonitoringStore }) {
+export function SettingsPanel({ store, api }: { store: MonitoringStore; api?: BackendApiClient }) {
   const { configuration } = useMonitoringConfiguration(store)
   const [target, setTarget] = useState(configuration.targetDiameterMm.toString())
   const [warning, setWarning] = useState(configuration.warningDeviationMm.toString())
@@ -48,6 +50,7 @@ export function SettingsPanel({ store }: { store: MonitoringStore }) {
           <p>“Critical” is presentation copy only. The shared domain and future transport contract use <code>OUT_OF_TOLERANCE</code>.</p>
         </aside>
       </div>
+      {api && <UdpInputSettings api={api} />}
     </section>
   )
 }

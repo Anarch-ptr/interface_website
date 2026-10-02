@@ -175,6 +175,22 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
 .reference-threshold.warning { color: var(--warning); border-color: rgba(255, 198, 109, 0.28); background: var(--warning-soft); }
 .reference-threshold.critical { color: var(--critical); border-color: rgba(255, 140, 130, 0.3); background: var(--critical-soft); }
 .settings-reference > p:last-child { margin-top: 24px; color: var(--muted); font-size: 0.73rem; line-height: 1.65; }
+.udp-settings { margin-top: 22px; }
+.udp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.udp-camera-card { padding: 0 0 20px; min-width: 0; }
+.udp-camera-card .panel-heading { align-items: center; }
+.udp-field { margin: 14px 22px 0; display: grid; gap: 6px; color: var(--muted); font-size: .72rem; }
+.udp-field input, .udp-field select, .udp-advanced input, .udp-advanced select { width: 100%; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: rgba(11,17,23,.62); color: var(--text); }
+.udp-advanced { margin: 18px 22px 0; padding: 12px; border: 1px solid var(--border); border-radius: 9px; }
+.udp-advanced summary { cursor: pointer; font-weight: 650; }
+.udp-advanced p, .udp-muted { margin: 10px 0; color: var(--quiet); font-size: .67rem; }
+.udp-advanced fieldset { margin-top: 12px; padding: 10px; border: 1px solid var(--border); }
+.udp-diagnostics { margin: 10px 22px 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+.udp-diagnostics div { padding: 8px; border: 1px solid var(--border); border-radius: 7px; }
+.udp-diagnostics dt { color: var(--quiet); font-size: .6rem; }
+.udp-diagnostics dd { margin: 3px 0 0; font: .72rem Consolas, monospace; }
+.revision-badges { display: flex; gap: 8px; }
+.revision-badges span { padding: 7px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .68rem; }
 
 @media (max-width: 1180px) {
   .app-shell { grid-template-columns: 86px minmax(0, 1fr); }
@@ -195,7 +211,7 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
   .health-strip { grid-template-columns: repeat(2, 1fr); }
   .health-item:nth-child(2) { border-right: 0; }
   .health-item:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
-  .dashboard-grid, .settings-layout { grid-template-columns: 1fr; }
+  .dashboard-grid, .settings-layout, .udp-grid { grid-template-columns: 1fr; }
   .reading-panel, .trend-panel { min-height: 410px; }
 }
 
