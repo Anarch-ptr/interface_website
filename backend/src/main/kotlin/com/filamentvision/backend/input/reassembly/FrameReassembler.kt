@@ -18,6 +18,27 @@ data class SingleDatagramInput(
     override val receivedAtEpochMillis: Long,
 ) : ReassemblyInput
 
+data class StructuredChunkInput(
+    override val cameraId: UdpCameraId,
+    override val source: InetSocketAddress,
+    val frameId: Long,
+    val chunkIndex: Int,
+    val chunkCount: Int,
+    val framePayloadBytes: Long,
+    val sourceTimestampMicros: Long,
+    val payload: ByteArray,
+    val payloadOffset: Int = 0,
+    val payloadLength: Int = payload.size,
+    override val receivedAtMonotonicNanos: Long,
+    override val receivedAtEpochMillis: Long,
+) : ReassemblyInput {
+    init {
+        require(chunkCount > 0)
+        require(chunkIndex in 0 until chunkCount)
+        require(payloadOffset >= 0 && payloadLength >= 0 && payloadOffset + payloadLength <= payload.size)
+    }
+}
+
 data class CompletedFrame(
     val cameraId: UdpCameraId,
     val source: InetSocketAddress,
@@ -30,6 +51,8 @@ data class CompletedFrame(
 
 enum class FrameDropReason {
     OVERSIZED_FRAME,
+    CONFLICTING_DUPLICATE,
+    METADATA_CONFLICT,
 }
 
 sealed interface FrameReassemblyResult {
