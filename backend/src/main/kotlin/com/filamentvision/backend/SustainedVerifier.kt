@@ -21,7 +21,8 @@ object SustainedVerifier {
         Files.createDirectories(output)
         Files.newBufferedWriter(output.resolve("samples.csv")).use { writer ->
             fun log(line: String) { println(line); writer.appendLine(line); writer.flush() }
-            val c = BackendComposition.open(output.resolve("monitoring.db"), output.resolve("objects"))
+            val c = BackendComposition.open(output.resolve("monitoring.db"), output.resolve("objects"),
+                inputSourceFactory = com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory)
             try {
                 val scenarios = listOf(SimulationScenario.NORMAL, SimulationScenario.CAMERA_MISMATCH,
                     SimulationScenario.TEMPORARY_DROPOUT, SimulationScenario.NORMAL)

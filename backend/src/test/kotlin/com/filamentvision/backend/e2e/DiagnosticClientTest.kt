@@ -13,7 +13,8 @@ import java.util.Collections
 class DiagnosticClientTest {
     @get:Rule val temporary = TemporaryFolder()
     @Test fun diagnosticUsesActualHttpAndWebsocketAndStopsItsSession() = runBlocking {
-        val c = BackendComposition.open(temporary.root.toPath().resolve("diagnostic.db"), temporary.root.toPath().resolve("objects"))
+        val c = BackendComposition.open(temporary.root.toPath().resolve("diagnostic.db"), temporary.root.toPath().resolve("objects"),
+            inputSourceFactory = com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory)
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) { installBackend(c) }.start(false)
         try {
             val port = engine.engine.resolvedConnectors().single().port

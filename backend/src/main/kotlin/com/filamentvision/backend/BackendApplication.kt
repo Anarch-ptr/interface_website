@@ -36,7 +36,6 @@ fun Application.installBackend(composition: BackendComposition) {
 fun main(args: Array<String>) = runBlocking {
     val options = parseBackendOptions(args)
     val composition = BackendComposition.open(options.database, options.snapshotRoot)
-    composition.source.setScenario(options.scenario)
     val engine = embeddedServer(Netty, host = options.host, port = options.port) { installBackend(composition) }
     val stop = CompletableDeferred<Unit>()
     val finished = CompletableDeferred<Unit>()
@@ -44,7 +43,7 @@ fun main(args: Array<String>) = runBlocking {
     Runtime.getRuntime().addShutdownHook(hook)
     try {
         engine.start(wait = false)
-        println("READY http://${options.host}:${options.port} database=${options.database} producer=0 test-mode=true")
+        println("READY http://${options.host}:${options.port} database=${options.database} producer=0 input=udp")
         Thread({
             while (true) {
                 val line = System.`in`.bufferedReader().readLine() ?: break
@@ -53,7 +52,7 @@ fun main(args: Array<String>) = runBlocking {
         }, "backend-console").apply { isDaemon = true; start() }
         stop.await()
     } finally {
-        try { engine.stop(250, 5000); composition.close(); println("STOPPED producer=${composition.source.activeProducerCount}") }
+        try { engine.stop(250, 5000); composition.close(); println("STOPPED producer=${composition.inputSource.activeProducerCount}") }
         finally { finished.complete(Unit); runCatching { Runtime.getRuntime().removeShutdownHook(hook) } }
     }
 }

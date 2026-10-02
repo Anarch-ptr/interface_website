@@ -16,6 +16,7 @@ import com.filamentvision.core.frame.*
 import com.filamentvision.core.fusion.LatestCompatiblePairingStrategy
 import com.filamentvision.core.input.ImageInputSource
 import com.filamentvision.core.input.CameraInput
+import com.filamentvision.core.input.CameraInputSource
 import com.filamentvision.core.metrics.*
 import com.filamentvision.core.model.OfficialMeasurement
 import com.filamentvision.core.preview.*
@@ -40,6 +41,8 @@ class BackendComposition private constructor(
     internal val repository: SqliteRepositories,
     internal val udpProfileRepository: SqliteUdpInputProfileRepository,
     internal val udpInputRouter: UdpInputRouter,
+    val inputSource: CameraInputSource,
+    internal val packetInspector: PacketInspector,
     internal val store: FileSnapshotObjectStore,
     private val scope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
@@ -47,7 +50,6 @@ class BackendComposition private constructor(
     private val monotonicMillis: () -> Long,
     initial: ConfigurationRevision,
     initialRevisions: ConfigurationRevisions,
-    dispatcher: CoroutineDispatcher,
 ) {
     val deviceId = "simulator-1"
     internal val a = CameraId("A")
@@ -65,29 +67,29 @@ class BackendComposition private constructor(
         UdpCameraId.A to UdpDiagnostics(udpInputRouter.effectiveProfiles.cameraA.transportMode),
         UdpCameraId.B to UdpDiagnostics(udpInputRouter.effectiveProfiles.cameraB.transportMode),
     )
-    internal val packetInspector = PacketInspector()
     internal var closed = false
     private val statePublicationLock = Any()
     private var finalizedAwaitingState: String? = null
-    val source = SimulatorImageInputSource(scope, dispatcher, epochMillis = epochMillis,
-        monotonicNanos = { monotonicMillis() * 1_000_000 })
-    private val tap = object : ImageInputSource by source {
-        override val frames = flow {
-            source.frames.collect { frame ->
-                val camera = MetricsCameraKey(deviceId, frame.cameraId)
+    val source: SimulatorImageInputSource get() = inputSource as SimulatorImageInputSource
+    private val tap = object : CameraInputSource by inputSource {
+        override val inputs = flow {
+            inputSource.inputs.collect { input ->
+                val camera = MetricsCameraKey(deviceId, input.cameraId)
                 metrics.received(camera)
-                val payload = ByteArray(frame.width * frame.height * 4)
-                for (i in 0 until frame.pixels.count) for (component in 0..3)
-                    payload[i * 4 + component] = (frame.pixels[i] ushr (24 - component * 8)).toByte()
-                previews.publish(PreviewFrame(PreviewKey(deviceId, frame.cameraId, PreviewStage.RAW), frame.capturedAtEpochMillis,
-                    frame.sequence, frame.width, frame.height, PreviewFormat.ARGB32, payload))
+                if (input is CameraInput.Image) {
+                    val frame = input.frame
+                    val payload = ByteArray(frame.width * frame.height * 4)
+                    for (i in 0 until frame.pixels.count) for (component in 0..3)
+                        payload[i * 4 + component] = (frame.pixels[i] ushr (24 - component * 8)).toByte()
+                    previews.publish(PreviewFrame(PreviewKey(deviceId, frame.cameraId, PreviewStage.RAW), frame.capturedAtEpochMillis,
+                        frame.sequence, frame.width, frame.height, PreviewFormat.ARGB32, payload))
+                }
                 val started = monotonicMillis()
-                emit(frame)
+                emit(input)
                 metrics.processed(camera)
                 metrics.latency(MetricLatency.PROCESSING, (monotonicMillis() - started).coerceAtLeast(0).toDouble())
             }
         }
-        override val inputs = frames.map(CameraInput::Image)
     }
     private var measurementOrdinal = 0L
     private var alarmOrdinal = 0L
@@ -165,8 +167,9 @@ class BackendComposition private constructor(
         publishState()
     }
     internal fun cameraViews() = listOf("A", "B").map { id -> CameraView(id, when {
-        source.scenario.value == SimulationScenario.CONNECTION_FAILURE -> CameraState.ERROR
-        source.scenario.value == SimulationScenario.CAMERA_A_ONLY && id == "B" || source.scenario.value == SimulationScenario.CAMERA_B_ONLY && id == "A" -> CameraState.UNAVAILABLE
+        inputSource is SimulatorImageInputSource && inputSource.scenario.value == SimulationScenario.CONNECTION_FAILURE -> CameraState.ERROR
+        inputSource is SimulatorImageInputSource && (inputSource.scenario.value == SimulationScenario.CAMERA_A_ONLY && id == "B" || inputSource.scenario.value == SimulationScenario.CAMERA_B_ONLY && id == "A") -> CameraState.UNAVAILABLE
+        inputSource is UdpCameraInputSource && !(if (id == "A") udpInputRouter.effectiveProfiles.cameraA.enabled else udpInputRouter.effectiveProfiles.cameraB.enabled) -> CameraState.UNAVAILABLE
         else -> CameraState.AVAILABLE
     }, true, true) }
     private val stateObserver = scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -203,8 +206,15 @@ class BackendComposition private constructor(
             UdpInputProfile(UdpCameraId.B, true, null, 5102, TransportMode.STRUCTURED_CHUNKED,
                 PayloadProfile.Gray8(48, 8), ApplicationFramingProfile(), TransportLimits()),
         )
-        suspend fun open(database: Path, snapshotRoot: Path, dispatcher: CoroutineDispatcher = Dispatchers.Default,
+        suspend fun open(database: Path, snapshotRoot: Path): BackendComposition = open(database, snapshotRoot,
+            ProductionUdpInputSourceFactory, Dispatchers.Default, Dispatchers.IO)
+        suspend fun open(database: Path, snapshotRoot: Path, dispatcher: CoroutineDispatcher,
             ioDispatcher: CoroutineDispatcher = Dispatchers.IO, epochMillis: () -> Long = System::currentTimeMillis,
+            monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 }): BackendComposition = open(database, snapshotRoot,
+                SimulatorBackendInputSourceFactory, dispatcher, ioDispatcher, epochMillis, monotonicMillis)
+        suspend fun open(database: Path, snapshotRoot: Path, inputSourceFactory: BackendInputSourceFactory,
+            dispatcher: CoroutineDispatcher = Dispatchers.Default, ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+            epochMillis: () -> Long = System::currentTimeMillis,
             monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 }): BackendComposition = withContext(ioDispatcher) {
             Files.createDirectories(database.toAbsolutePath().parent)
             Files.createDirectories(snapshotRoot)
@@ -216,10 +226,14 @@ class BackendComposition private constructor(
                 val udpRepository = SqliteUdpInputProfileRepository(db, defaultUdpInputProfiles())
                 val udpAppliedRevision = udpRepository.appliedRevision()
                 val udpApplied = checkNotNull(udpRepository.get(udpAppliedRevision))
-                val udpRouter = UdpInputRouter(udpAppliedRevision, udpApplied.profiles,
-                    UdpCameraRuntimeSwapper { _, _, _, _ -> })
-                BackendComposition(db, r, udpRepository, udpRouter, FileSnapshotObjectStore(snapshotRoot), scope,
-                    ioDispatcher, epochMillis, monotonicMillis, initial, r.revisions(), dispatcher)
+                val inspector = PacketInspector()
+                val inputSource = inputSourceFactory.create(scope, dispatcher, epochMillis,
+                    { monotonicMillis() * 1_000_000 }, udpApplied.profiles, inspector)
+                val udpRouter = UdpInputRouter(udpAppliedRevision, udpApplied.profiles, UdpCameraRuntimeSwapper { camera, _, next, restart ->
+                    if (inputSource is UdpCameraInputSource) inputSource.applyProfile(camera, next, restart)
+                })
+                BackendComposition(db, r, udpRepository, udpRouter, inputSource, inspector,
+                    FileSnapshotObjectStore(snapshotRoot), scope, ioDispatcher, epochMillis, monotonicMillis, initial, r.revisions())
             } catch (error: Throwable) { scope.cancel(); db.close(); throw error }
         }
     }

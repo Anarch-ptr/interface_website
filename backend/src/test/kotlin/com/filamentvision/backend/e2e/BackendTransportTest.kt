@@ -18,7 +18,8 @@ import org.junit.rules.TemporaryFolder
 class BackendTransportTest {
     @get:Rule val temporary = TemporaryFolder()
     @Test fun actualRestAndWebsocketsShareOneProducerAndObserveDurableHistory() = testApplication {
-        val c = BackendComposition.open(temporary.root.toPath().resolve("http.db"), temporary.root.toPath().resolve("objects"))
+        val c = BackendComposition.open(temporary.root.toPath().resolve("http.db"), temporary.root.toPath().resolve("objects"),
+            inputSourceFactory = com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory)
         application { installBackend(c) }
         val ws = createClient { install(WebSockets) }
         suspend fun post(action: String, id: String) = client.post("/api/v1/devices/simulator-1/monitoring/$action") {

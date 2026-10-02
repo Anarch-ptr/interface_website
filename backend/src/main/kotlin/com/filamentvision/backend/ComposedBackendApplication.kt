@@ -114,11 +114,11 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
             }
         }
     }
-    override suspend fun udpDiagnostics(deviceId: String, cameraId: String) = c.udpDiagnostics[when (cameraId) {
-        "A" -> com.filamentvision.backend.input.profile.UdpCameraId.A
-        "B" -> com.filamentvision.backend.input.profile.UdpCameraId.B
-        else -> { device(deviceId); missing() }
-    }]!!.snapshot().also { device(deviceId) }
+    override suspend fun udpDiagnostics(deviceId: String, cameraId: String): com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot {
+        val camera = udpCamera(deviceId, cameraId)
+        return (c.inputSource as? UdpCameraInputSource)?.udpDiagnostics(camera)
+            ?: c.udpDiagnostics.getValue(camera).snapshot()
+    }
     private fun udpCamera(deviceId: String, cameraId: String): com.filamentvision.backend.input.profile.UdpCameraId {
         device(deviceId)
         return when (cameraId) {

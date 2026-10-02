@@ -18,24 +18,12 @@ class UdpCameraInputSource(
     val packetInspector: PacketInspector = PacketInspector(),
 ) : CameraInputSource {
     private val lifecycle = Mutex()
-    private val profileSet = profiles.also {
+    private var profileSet = profiles.also {
         require(UdpInputProfileValidator().validate(it).isValid) { "UDP input profiles are invalid" }
     }
-    private val udpDiagnostics = listOf(profileSet.cameraA, profileSet.cameraB).associate { it.cameraId to UdpDiagnostics(it.transportMode) }
+    private val udpDiagnostics = listOf(profileSet.cameraA, profileSet.cameraB).associate { it.cameraId to UdpDiagnostics(it.transportMode) }.toMutableMap()
     private val processors = listOf(profileSet.cameraA, profileSet.cameraB)
-        .filter { it.enabled }
-        .associate {
-            val diagnostics = udpDiagnostics.getValue(it.cameraId)
-            val observer = object : com.filamentvision.backend.input.reassembly.StructuredReassemblyObserver {
-                override fun onFrameStarted() = diagnostics.frameStarted()
-                override fun onDuplicateChunk() = diagnostics.chunkDuplicate()
-                override fun onOutOfOrderChunk() = diagnostics.chunkOutOfOrder()
-                override fun onLateChunk() = diagnostics.lateChunk()
-                override fun onTimeout(missingChunks: Int) = diagnostics.reassemblyTimeout(missingChunks.toLong())
-                override fun onEvicted(missingChunks: Int) = diagnostics.reassemblyEviction(missingChunks.toLong())
-            }
-            it.cameraId to UdpCameraProcessor(CompiledUdpInputProfile.compile(it, observer), diagnostics, packetInspector)
-        }
+        .associate { it.cameraId to compileProcessor(it, udpDiagnostics.getValue(it.cameraId)) }.toMutableMap()
     private val receivers = mutableMapOf<UdpCameraId, UdpReceiver>()
     private val mailboxLock = Any()
     private val pending = linkedMapOf<UdpCameraId, CameraInput>()
@@ -49,6 +37,8 @@ class UdpCameraInputSource(
     override var activeProducerCount: Int = 0
         private set
     var totalProducerStarts: Long = 0
+        private set
+    var maximumActiveProducerCount: Int = 0
         private set
 
     override val inputs = flow {
@@ -77,32 +67,13 @@ class UdpCameraInputSource(
         val started = mutableListOf<UdpReceiver>()
         try {
             for (profile in listOf(profileSet.cameraA, profileSet.cameraB).filter { it.enabled }) {
-                val processor = processors.getValue(profile.cameraId)
-                val cameraDiagnostics = udpDiagnostics.getValue(profile.cameraId)
-                val receiver = UdpReceiver(profile, object : UdpReceiverObserver {
-                    override fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = cameraDiagnostics.datagramReceived(size, receivedAtMonotonicNanos)
-                    override fun onSourceFiltered(datagram: ReceivedDatagram) {
-                        cameraDiagnostics.sourceFiltered()
-                        inspectDatagram(profile.cameraId, datagram, RawParseStatus.SOURCE_IP_MISMATCH)
-                    }
-                    override fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) {
-                        cameraDiagnostics.datagramTooLargeOrTruncated()
-                        inspectDatagram(profile.cameraId, datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
-                    }
-                }) { datagram ->
-                    inspectDatagram(profile.cameraId, datagram, RawParseStatus.VALID)
-                    val result = datagram.bytes.withBytes { bytes, size ->
-                        processor.process(
-                            OwnedUdpPacket(bytes, size, datagram.source, datagram.receivedAtMonotonicNanos, datagram.receivedAtEpochMillis),
-                        )
-                    }
-                    if (result is UdpCameraProcessResult.Accepted) offerInput(result.input)
-                }
+                val receiver = createReceiver(profile)
                 receiver.start()
                 receivers[profile.cameraId] = receiver
                 started += receiver
             }
             activeProducerCount = 1
+            maximumActiveProducerCount = maxOf(maximumActiveProducerCount, activeProducerCount)
             totalProducerStarts++
             mutableState.value = ImageInputState.RUNNING
         } catch (error: Throwable) {
@@ -111,6 +82,31 @@ class UdpCameraInputSource(
             activeProducerCount = 0
             mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = error.message)
             mutableState.value = ImageInputState.ERROR
+            throw error
+        }
+    }
+
+    suspend fun applyProfile(cameraId: UdpCameraId, next: UdpInputProfile, receiverRestart: Boolean) = lifecycle.withLock {
+        val previous = if (cameraId == UdpCameraId.A) profileSet.cameraA else profileSet.cameraB
+        if (previous == next) return@withLock
+        val oldProcessor = processors.getValue(cameraId)
+        val oldDiagnostics = udpDiagnostics.getValue(cameraId)
+        val replacementDiagnostics = if (previous.transportMode == next.transportMode) oldDiagnostics else UdpDiagnostics(next.transportMode)
+        val replacementProcessor = compileProcessor(next, replacementDiagnostics)
+        val wasRunning = activeProducerCount == 1
+        if (receiverRestart && wasRunning) receivers.remove(cameraId)?.stop()
+        processors[cameraId] = replacementProcessor
+        udpDiagnostics[cameraId] = replacementDiagnostics
+        profileSet = replace(profileSet, cameraId, next)
+        try {
+            if (receiverRestart && wasRunning && next.enabled) {
+                createReceiver(next).also { it.start(); receivers[cameraId] = it }
+            }
+        } catch (error: Throwable) {
+            processors[cameraId] = oldProcessor
+            udpDiagnostics[cameraId] = oldDiagnostics
+            profileSet = replace(profileSet, cameraId, previous)
+            if (wasRunning && previous.enabled) createReceiver(previous).also { it.start(); receivers[cameraId] = it }
             throw error
         }
     }
@@ -160,5 +156,37 @@ class UdpCameraInputSource(
             datagram.bytes.withBytes { bytes, size -> packetInspector.captureRaw(cameraId, bytes, size, datagram.source,
                 datagram.receivedAtMonotonicNanos, status) }
         } catch (_: Throwable) { }
+    }
+    private fun compileProcessor(profile: UdpInputProfile, diagnostics: UdpDiagnostics): UdpCameraProcessor {
+        val observer = object : com.filamentvision.backend.input.reassembly.StructuredReassemblyObserver {
+            override fun onFrameStarted() = diagnostics.frameStarted()
+            override fun onDuplicateChunk() = diagnostics.chunkDuplicate()
+            override fun onOutOfOrderChunk() = diagnostics.chunkOutOfOrder()
+            override fun onLateChunk() = diagnostics.lateChunk()
+            override fun onTimeout(missingChunks: Int) = diagnostics.reassemblyTimeout(missingChunks.toLong())
+            override fun onEvicted(missingChunks: Int) = diagnostics.reassemblyEviction(missingChunks.toLong())
+        }
+        return UdpCameraProcessor(CompiledUdpInputProfile.compile(profile, observer), diagnostics, packetInspector)
+    }
+    private fun createReceiver(profile: UdpInputProfile): UdpReceiver {
+        val processor = processors.getValue(profile.cameraId)
+        val cameraDiagnostics = udpDiagnostics.getValue(profile.cameraId)
+        return UdpReceiver(profile, object : UdpReceiverObserver {
+            override fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = cameraDiagnostics.datagramReceived(size, receivedAtMonotonicNanos)
+            override fun onSourceFiltered(datagram: ReceivedDatagram) {
+                cameraDiagnostics.sourceFiltered(); inspectDatagram(profile.cameraId, datagram, RawParseStatus.SOURCE_IP_MISMATCH)
+            }
+            override fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) {
+                cameraDiagnostics.datagramTooLargeOrTruncated(); inspectDatagram(profile.cameraId, datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
+            }
+        }) { datagram ->
+            inspectDatagram(profile.cameraId, datagram, RawParseStatus.VALID)
+            val result = datagram.bytes.withBytes { bytes, size -> processor.process(
+                OwnedUdpPacket(bytes, size, datagram.source, datagram.receivedAtMonotonicNanos, datagram.receivedAtEpochMillis)) }
+            if (result is UdpCameraProcessResult.Accepted) offerInput(result.input)
+        }
+    }
+    private fun replace(set: UdpInputProfileSet, id: UdpCameraId, profile: UdpInputProfile) = when (id) {
+        UdpCameraId.A -> set.copy(cameraA = profile); UdpCameraId.B -> set.copy(cameraB = profile)
     }
 }

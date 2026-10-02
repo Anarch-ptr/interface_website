@@ -23,6 +23,7 @@ class SimulatedMonitoringE2eTest {
     @Test fun imagesReachDurableMeasurementsAlarmsAndOrderedFinalEvent() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val c = BackendComposition.open(temporary.root.toPath().resolve("e2e.db"), temporary.root.toPath().resolve("objects"),
+            com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory,
             dispatcher, dispatcher, { 1000 + testScheduler.currentTime }, { testScheduler.currentTime })
         try {
             assertEquals(0, c.application.state("simulator-1").monitoring.activeProducerCount)
@@ -74,10 +75,12 @@ class SimulatedMonitoringE2eTest {
         val d = StandardTestDispatcher(testScheduler)
         val db = temporary.root.toPath().resolve("restart.db")
         val root = temporary.root.toPath().resolve("objects")
-        val c = BackendComposition.open(db, root, d, d, { 1000 + testScheduler.currentTime }, { testScheduler.currentTime })
+        val c = BackendComposition.open(db, root, com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory,
+            d, d, { 1000 + testScheduler.currentTime }, { testScheduler.currentTime })
         val first = c.application.start("simulator-1", "start", null, null).session!!.id
         runCurrent(); c.application.stop("simulator-1", "stop"); c.close()
-        val next = BackendComposition.open(db, root, d, d, { 2000 + testScheduler.currentTime }, { testScheduler.currentTime })
+        val next = BackendComposition.open(db, root, com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory,
+            d, d, { 2000 + testScheduler.currentTime }, { testScheduler.currentTime })
         try {
             assertEquals(0, next.source.activeProducerCount)
             assertEquals(2L, next.application.session(first).finalization!!.statistics.sampleCount)
