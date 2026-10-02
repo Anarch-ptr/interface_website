@@ -9,6 +9,7 @@ import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
 import com.filamentvision.core.session.SessionStatistics
 import com.filamentvision.core.vision.CameraMeasurement
+import com.filamentvision.core.vision.CameraMeasurementSource
 import com.filamentvision.core.vision.DetectionError
 import java.sql.Connection
 import java.sql.ResultSet
@@ -186,7 +187,7 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         finite(camera.diameterMm, camera.confidence)
         camera.pixelWidth?.let { finite(it) }
         return with(camera) { listOf(cameraId.value, pixelWidth, diameterMm, confidence, timestamp, sequence, valid,
-            roiLeft, roiTop, roiRight, roiBottom, leftEdge, rightEdge, error?.name) }
+            roiLeft, roiTop, roiRight, roiBottom, leftEdge, rightEdge, error?.name, source.name) }
     }
     private fun ResultSet.measurementRecord() = MeasurementRecord(getString("id"), getString("session_id"), OfficialMeasurement(
         camera("a"), camera("b"), getDouble("fused_diameter"), getDouble("shape_difference"),
@@ -213,7 +214,8 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         return CameraMeasurement(CameraId(id), doubleOrNull(name("pixel_width")), getDouble(name("diameter")),
             getDouble(name("confidence")), getLong(name("timestamp")), getLong(name("sequence")), getBoolean(name("valid")),
             getInt(name("roi_left")), getInt(name("roi_top")), getInt(name("roi_right")), getInt(name("roi_bottom")),
-            intOrNull(name("left_edge")), intOrNull(name("right_edge")), getString(name("error"))?.let(DetectionError::valueOf))
+            intOrNull(name("left_edge")), intOrNull(name("right_edge")), getString(name("error"))?.let(DetectionError::valueOf),
+            getString(name("source"))?.let(CameraMeasurementSource::valueOf) ?: CameraMeasurementSource.VISION)
     }
     private fun ResultSet.alarmState(prefix: String) = AlarmState(AlarmLevel.valueOf(getString(prefix + "_level")),
         AlarmDirection.valueOf(getString(prefix + "_direction")), getDouble(prefix + "_deviation"))
@@ -235,7 +237,7 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
     private fun fail(type: RepositoryFailure, message: String): Nothing = throw RepositoryException(type, message)
     companion object {
         private val cameraFields = listOf("id", "pixel_width", "diameter", "confidence", "timestamp", "sequence", "valid",
-            "roi_left", "roi_top", "roi_right", "roi_bottom", "left_edge", "right_edge", "error")
+            "roi_left", "roi_top", "roi_right", "roi_bottom", "left_edge", "right_edge", "error", "source")
         private val measurementColumns = listOf("id", "session_id", "timestamp", "applied_revision", "fused_diameter",
             "shape_difference", "confidence", "status", "fusion_reason") + cameraFields.map { "a_" + it } + cameraFields.map { "b_" + it }
     }

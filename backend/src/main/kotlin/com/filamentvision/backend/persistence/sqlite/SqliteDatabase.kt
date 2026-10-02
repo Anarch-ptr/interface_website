@@ -24,13 +24,21 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
                     migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
                     statement.execute("PRAGMA user_version = 1")
                 }
-            } else if (version !in 1..2) throw RepositoryException(RepositoryFailure.STORAGE, "Unsupported schema version")
+            } else if (version !in 1..3) throw RepositoryException(RepositoryFailure.STORAGE, "Unsupported schema version")
             if (version < 2) {
                 val migration = checkNotNull(javaClass.getResourceAsStream("/db/migration/V002__snapshot_source_sequence.sql"))
                     .bufferedReader().use { it.readText() }
                 connection.createStatement().use { statement ->
                     migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
                     statement.execute("PRAGMA user_version = 2")
+                }
+            }
+            if (version < 3) {
+                val migration = checkNotNull(javaClass.getResourceAsStream("/db/migration/V003__udp_input_profiles_and_measurement_source.sql"))
+                    .bufferedReader().use { it.readText() }
+                connection.createStatement().use { statement ->
+                    migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
+                    statement.execute("PRAGMA user_version = 3")
                 }
             }
         }
