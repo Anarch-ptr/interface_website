@@ -32,6 +32,7 @@ interface UdpReceiverObserver {
     fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = Unit
     fun onSourceFiltered(datagram: ReceivedDatagram) = Unit
     fun onDropped(reason: UdpReceiverDropReason) = Unit
+    fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) = onDropped(reason)
     fun onFailure(error: Throwable) = Unit
 }
 
@@ -138,7 +139,7 @@ class UdpReceiver(
                     if (!sourceFilter.accepts(source)) {
                         observer.onSourceFiltered(datagram)
                     } else if (receiveCapacity.sentinelEnabled && receivedSize == receiveCapacity.receiveCapacity) {
-                        observer.onDropped(UdpReceiverDropReason.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
+                        observer.onDropped(UdpReceiverDropReason.DATAGRAM_TOO_LARGE_OR_TRUNCATED, datagram)
                     } else {
                         consumer.accept(datagram)
                     }

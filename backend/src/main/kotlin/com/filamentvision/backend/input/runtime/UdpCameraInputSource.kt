@@ -11,9 +11,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.filamentvision.backend.input.diagnostics.*
+import com.filamentvision.backend.input.inspector.*
 
 class UdpCameraInputSource(
     profiles: UdpInputProfileSet,
+    val packetInspector: PacketInspector = PacketInspector(),
 ) : CameraInputSource {
     private val lifecycle = Mutex()
     private val profileSet = profiles.also {
@@ -32,7 +34,7 @@ class UdpCameraInputSource(
                 override fun onTimeout(missingChunks: Int) = diagnostics.reassemblyTimeout(missingChunks.toLong())
                 override fun onEvicted(missingChunks: Int) = diagnostics.reassemblyEviction(missingChunks.toLong())
             }
-            it.cameraId to UdpCameraProcessor(CompiledUdpInputProfile.compile(it, observer), diagnostics)
+            it.cameraId to UdpCameraProcessor(CompiledUdpInputProfile.compile(it, observer), diagnostics, packetInspector)
         }
     private val receivers = mutableMapOf<UdpCameraId, UdpReceiver>()
     private val mailboxLock = Any()
@@ -79,9 +81,16 @@ class UdpCameraInputSource(
                 val cameraDiagnostics = udpDiagnostics.getValue(profile.cameraId)
                 val receiver = UdpReceiver(profile, object : UdpReceiverObserver {
                     override fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = cameraDiagnostics.datagramReceived(size, receivedAtMonotonicNanos)
-                    override fun onSourceFiltered(datagram: ReceivedDatagram) = cameraDiagnostics.sourceFiltered()
-                    override fun onDropped(reason: UdpReceiverDropReason) = cameraDiagnostics.datagramTooLargeOrTruncated()
+                    override fun onSourceFiltered(datagram: ReceivedDatagram) {
+                        cameraDiagnostics.sourceFiltered()
+                        inspectDatagram(profile.cameraId, datagram, RawParseStatus.SOURCE_IP_MISMATCH)
+                    }
+                    override fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) {
+                        cameraDiagnostics.datagramTooLargeOrTruncated()
+                        inspectDatagram(profile.cameraId, datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
+                    }
                 }) { datagram ->
+                    inspectDatagram(profile.cameraId, datagram, RawParseStatus.VALID)
                     val result = datagram.bytes.withBytes { bytes, size ->
                         processor.process(
                             OwnedUdpPacket(bytes, size, datagram.source, datagram.receivedAtMonotonicNanos, datagram.receivedAtEpochMillis),
@@ -145,5 +154,11 @@ class UdpCameraInputSource(
 
     private fun close(input: CameraInput) {
         if (input is CameraInput.Image) input.frame.close()
+    }
+    private fun inspectDatagram(cameraId: UdpCameraId, datagram: ReceivedDatagram, status: RawParseStatus) {
+        try {
+            datagram.bytes.withBytes { bytes, size -> packetInspector.captureRaw(cameraId, bytes, size, datagram.source,
+                datagram.receivedAtMonotonicNanos, status) }
+        } catch (_: Throwable) { }
     }
 }

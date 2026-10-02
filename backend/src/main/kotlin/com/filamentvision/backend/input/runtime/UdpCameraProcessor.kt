@@ -10,6 +10,7 @@ import com.filamentvision.core.frame.CameraId
 import com.filamentvision.core.input.*
 import java.net.InetSocketAddress
 import com.filamentvision.backend.input.diagnostics.UdpDiagnostics
+import com.filamentvision.backend.input.inspector.*
 
 data class OwnedUdpPacket(
     val bytes: ByteArray,
@@ -27,7 +28,8 @@ sealed interface UdpCameraProcessResult {
     data class Rejected(val stage: UdpProcessingStage, val reason: String) : UdpCameraProcessResult
 }
 
-class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private val diagnostics: UdpDiagnostics? = null) {
+class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private val diagnostics: UdpDiagnostics? = null,
+    private val inspector: PacketInspector? = null) {
     private var sequence = 0L
 
     fun process(packet: OwnedUdpPacket): UdpCameraProcessResult {
@@ -75,6 +77,10 @@ class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private 
         )
         if (parsed is TransportParseResult.Rejected) throw StageFailure(UdpProcessingStage.TRANSPORT, parsed.error.code.name)
         val datagram = (parsed as TransportParseResult.Accepted).datagram
+        inspect { inspector?.attachTransport(compiled.profile.cameraId, datagram.header.let {
+            TransportInspection(it.frameId.toLong(), it.chunkIndex, it.chunkCount, it.sourceTimestampMicros,
+                it.payloadLength, it.framePayloadBytes)
+        }) }
         return datagram.payload.withBytes { bytes, offset, length ->
             val framed = compiled.framingParser.parse(FramingScope.DATAGRAM, ByteRange(bytes, offset, length))
             if (framed is ApplicationFramingResult.Rejected) throw StageFailure(UdpProcessingStage.DATAGRAM_FRAMING, framed.error.name)
@@ -104,6 +110,8 @@ class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private 
         val payload = (framed as ApplicationFramingResult.Accepted).payload.copyOwned()
         val decoded = compiled.decoder.decode(payload)
         if (decoded is PayloadDecodeResult.Failure) return rejected(UdpProcessingStage.DECODER, decoded.error.name)
+        inspect { inspector?.captureParsed(frame.cameraId, payload, payloadFormat(), "VALID",
+            framed.matchedHeader?.length ?: 0, framed.matchedFooter?.length ?: 0, frame.completedAtMonotonicNanos) }
         val value = (decoded as PayloadDecodeResult.Success).value
         val nextSequence = ++sequence
         val input = when (value) {
@@ -132,6 +140,11 @@ class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private 
     }
 
     private fun rejected(stage: UdpProcessingStage, reason: String) = UdpCameraProcessResult.Rejected(stage, reason)
+    private fun payloadFormat() = when (compiled.profile.payload) {
+        is PayloadProfile.Gray8 -> "GRAY8"; is PayloadProfile.Binary -> "BINARY"; is PayloadProfile.Jpeg -> "JPEG"
+        is PayloadProfile.Rgb888 -> "RGB888"; is PayloadProfile.Diameter -> "DIAMETER"
+    }
+    private inline fun inspect(action: () -> Unit) { try { action() } catch (_: Throwable) { } }
 
     private class StageFailure(val stage: UdpProcessingStage, message: String) : RuntimeException(message)
 
