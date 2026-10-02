@@ -32,6 +32,11 @@ class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private 
     private val inspector: PacketInspector? = null) {
     private var sequence = 0L
 
+    internal val inFlightFrameCount: Int get() = compiled.reassembler.inFlightFrameCount
+    internal val bufferedReassemblyBytes: Long get() = compiled.reassembler.bufferedBytes
+    internal val reassemblyTombstoneCount: Int get() =
+        (compiled.reassembler as? StructuredChunkFrameReassembler)?.tombstoneCount ?: 0
+
     fun process(packet: OwnedUdpPacket): UdpCameraProcessResult {
         val result = try {
         val completed = when (compiled.profile.transportMode) {

@@ -44,8 +44,8 @@ class UdpDiagnostics(private val transportMode: TransportMode) {
         when {
             stage == UdpProcessingStage.TRANSPORT -> invalidTransport.incrementAndGet()
             reason == "OVERSIZED_FRAME" -> oversized.incrementAndGet()
-            reason == "INVALID_HEADER" -> invalidHeader.incrementAndGet()
-            reason == "INVALID_FOOTER" -> invalidFooter.incrementAndGet()
+            reason == "HEADER_MISMATCH" || reason == "INVALID_HEADER" -> invalidHeader.incrementAndGet()
+            reason == "FOOTER_MISMATCH" || reason == "INVALID_FOOTER" -> invalidFooter.incrementAndGet()
             reason == "INVALID_PAYLOAD_SIZE" -> { invalidPayload.incrementAndGet(); if (stage == UdpProcessingStage.DECODER) decode.incrementAndGet() }
             stage == UdpProcessingStage.DECODER -> decode.incrementAndGet()
         }
