@@ -94,7 +94,7 @@ class StructuredChunkFrameReassemblerOrderingTest {
         frameId = frameId,
         chunkIndex = chunkIndex,
         chunkCount = chunkCount,
-        framePayloadBytes = 4,
+        framePayloadBytes = (chunkCount * payloadLength).toLong(),
         sourceTimestampMicros = 77,
         payload = payload,
         payloadOffset = payloadOffset,

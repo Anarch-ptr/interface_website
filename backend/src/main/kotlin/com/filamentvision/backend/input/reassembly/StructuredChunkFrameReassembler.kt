@@ -3,7 +3,14 @@ package com.filamentvision.backend.input.reassembly
 import com.filamentvision.backend.input.profile.UdpCameraId
 import java.net.InetSocketAddress
 
-class StructuredChunkFrameReassembler : FrameReassembler {
+class StructuredChunkFrameReassembler(
+    private val maxInFlightFrames: Int = 4,
+    private val maxFrameBytes: Long = 8L * 1024 * 1024,
+    private val maxChunkCount: Int = 4_096,
+    private val maxBufferedBytes: Long = 32L * 1024 * 1024,
+    private val frameTimeoutNanos: Long = 1_000_000_000,
+    private val maxTombstones: Int = 64,
+) : FrameReassembler {
     private data class FrameKey(
         val cameraId: UdpCameraId,
         val source: InetSocketAddress,
@@ -20,19 +27,67 @@ class StructuredChunkFrameReassembler : FrameReassembler {
     )
 
     private val frames = linkedMapOf<FrameKey, InFlightFrame>()
+    private val timeoutTombstones = linkedMapOf<FrameKey, Long>()
     private var retainedBytes = 0L
+
+    init {
+        require(maxInFlightFrames in 1..32)
+        require(maxFrameBytes in 1..HARD_MAX_FRAME_BYTES)
+        require(maxChunkCount in 1..HARD_MAX_CHUNK_COUNT)
+        require(maxBufferedBytes in 1..HARD_MAX_BUFFERED_BYTES)
+        require(frameTimeoutNanos > 0)
+        require(maxTombstones > 0)
+    }
 
     var identicalDuplicateChunks: Long = 0
         private set
     var conflictingDuplicateChunks: Long = 0
         private set
+    var lateChunks: Long = 0
+        private set
+    var reassemblyTimeouts: Long = 0
+        private set
+    var inFlightEvictions: Long = 0
+        private set
+    var bufferBudgetDrops: Long = 0
+        private set
 
     override val inFlightFrameCount: Int get() = frames.size
     override val bufferedBytes: Long get() = retainedBytes
+    val tombstoneCount: Int get() = timeoutTombstones.size
+
+    fun expire(nowMonotonicNanos: Long): Int {
+        purgeOldTombstones(nowMonotonicNanos)
+        val expired = frames.entries
+            .filter { nowMonotonicNanos - it.value.firstReceivedAtMonotonicNanos > frameTimeoutNanos }
+            .map { it.key to it.value }
+        expired.forEach { (key, frame) ->
+            remove(key, frame)
+            addTombstone(key, nowMonotonicNanos)
+            reassemblyTimeouts++
+        }
+        return expired.size
+    }
 
     override fun accept(input: ReassemblyInput): FrameReassemblyResult {
         require(input is StructuredChunkInput) { "Structured reassembler requires StructuredChunkInput" }
+        expire(input.receivedAtMonotonicNanos)
         val key = FrameKey(input.cameraId, input.source, input.frameId)
+        if (timeoutTombstones.containsKey(key)) {
+            lateChunks++
+            return FrameReassemblyResult.Dropped(FrameDropReason.LATE_CHUNK)
+        }
+        if (input.framePayloadBytes > maxFrameBytes) {
+            return FrameReassemblyResult.Dropped(FrameDropReason.OVERSIZED_FRAME)
+        }
+        if (input.chunkCount > maxChunkCount) {
+            return FrameReassemblyResult.Dropped(FrameDropReason.TOO_MANY_CHUNKS)
+        }
+        if (!frames.containsKey(key) && frames.size >= maxInFlightFrames) {
+            val oldest = frames.entries.first()
+            remove(oldest.key, oldest.value)
+            inFlightEvictions++
+        }
         val frame = frames.getOrPut(key) {
             InFlightFrame(
                 chunkCount = input.chunkCount,
@@ -66,11 +121,26 @@ class StructuredChunkFrameReassembler : FrameReassembler {
             }
         }
 
+        if (!makeRoomFor(key, frame, ownedChunk.size.toLong())) {
+            remove(key, frame)
+            bufferBudgetDrops++
+            return FrameReassemblyResult.Dropped(FrameDropReason.BUFFER_BUDGET_EXCEEDED)
+        }
+
         frame.chunks[input.chunkIndex] = ownedChunk
         retainedBytes += ownedChunk.size
+        val currentFrameBytes = frame.chunks.sumOf { it?.size?.toLong() ?: 0L }
+        if (currentFrameBytes > frame.framePayloadBytes) {
+            remove(key, frame)
+            return FrameReassemblyResult.Dropped(FrameDropReason.FRAME_SIZE_MISMATCH)
+        }
         if (frame.chunks.any { it == null }) return FrameReassemblyResult.Pending
 
         val payloadSize = frame.chunks.sumOf { it!!.size }
+        if (payloadSize.toLong() != frame.framePayloadBytes) {
+            remove(key, frame)
+            return FrameReassemblyResult.Dropped(FrameDropReason.FRAME_SIZE_MISMATCH)
+        }
         val payload = ByteArray(payloadSize)
         var offset = 0
         frame.chunks.forEach { chunk ->
@@ -96,5 +166,36 @@ class StructuredChunkFrameReassembler : FrameReassembler {
         if (frames.remove(key) != null) {
             retainedBytes -= frame.chunks.sumOf { it?.size?.toLong() ?: 0L }
         }
+    }
+
+    private fun makeRoomFor(currentKey: FrameKey, currentFrame: InFlightFrame, incomingBytes: Long): Boolean {
+        if (incomingBytes > maxBufferedBytes) return false
+        while (retainedBytes + incomingBytes > maxBufferedBytes) {
+            val oldestOther = frames.entries.firstOrNull { it.key != currentKey } ?: return false
+            remove(oldestOther.key, oldestOther.value)
+            inFlightEvictions++
+        }
+        return frames[currentKey] === currentFrame
+    }
+
+    private fun addTombstone(key: FrameKey, nowMonotonicNanos: Long) {
+        timeoutTombstones[key] = nowMonotonicNanos
+        while (timeoutTombstones.size > maxTombstones) {
+            timeoutTombstones.remove(timeoutTombstones.keys.first())
+        }
+    }
+
+    private fun purgeOldTombstones(nowMonotonicNanos: Long) {
+        val expiredKeys = timeoutTombstones
+            .filterValues { nowMonotonicNanos - it > frameTimeoutNanos }
+            .keys
+            .toList()
+        expiredKeys.forEach(timeoutTombstones::remove)
+    }
+
+    private companion object {
+        const val HARD_MAX_FRAME_BYTES = 32L * 1024 * 1024
+        const val HARD_MAX_CHUNK_COUNT = 8_192
+        const val HARD_MAX_BUFFERED_BYTES = 64L * 1024 * 1024
     }
 }

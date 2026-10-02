@@ -35,7 +35,7 @@ data class StructuredChunkInput(
     init {
         require(chunkCount > 0)
         require(chunkIndex in 0 until chunkCount)
-        require(payloadOffset >= 0 && payloadLength >= 0 && payloadOffset + payloadLength <= payload.size)
+        require(payloadOffset >= 0 && payloadLength >= 0 && payloadOffset <= payload.size - payloadLength)
     }
 }
 
@@ -53,6 +53,10 @@ enum class FrameDropReason {
     OVERSIZED_FRAME,
     CONFLICTING_DUPLICATE,
     METADATA_CONFLICT,
+    LATE_CHUNK,
+    FRAME_SIZE_MISMATCH,
+    BUFFER_BUDGET_EXCEEDED,
+    TOO_MANY_CHUNKS,
 }
 
 sealed interface FrameReassemblyResult {
