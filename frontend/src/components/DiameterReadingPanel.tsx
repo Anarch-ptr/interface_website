@@ -1,0 +1,29 @@
+import { MeasurementStatus, type DiameterReading, type MonitoringConfiguration } from '../domain/monitoring'
+
+export function DiameterReadingPanel({ reading, configuration }: { reading: DiameterReading | null; configuration: Readonly<MonitoringConfiguration> }) {
+  const presentation = statusPresentation(reading?.status ?? MeasurementStatus.DISCONNECTED)
+  return (
+    <section className={`panel reading-panel status-${presentation.tone}`}>
+      <div className="reading-panel-header"><div><p className="panel-kicker">CURRENT DIAMETER</p><span>Fused measurement</span></div><span className={`severity-pill ${presentation.tone}`}>{presentation.label}</span></div>
+      <div className="diameter-core"><output aria-label="Current filament diameter">{reading ? reading.fusedDiameterMm.toFixed(3) : '—.———'}</output><span>mm</span></div>
+      <p className="protocol-status">{presentation.protocolLabel}</p>
+      <div className="reading-details">
+        <div><span>Target</span><strong>{configuration.targetDiameterMm.toFixed(3)} mm</strong></div>
+        <div><span>Deviation</span><strong>{reading ? formatSigned(reading.deviationMm, ' mm') : '—'}</strong></div>
+        <div><span>Deviation %</span><strong>{reading ? formatSigned(reading.deviationPercent, '%') : '—'}</strong></div>
+      </div>
+      <div className="threshold-scale" aria-label="Configured alarm thresholds"><span>Warning ±{configuration.warningDeviationMm.toFixed(3)} mm</span><span>Out of tolerance ±{configuration.outOfToleranceDeviationMm.toFixed(3)} mm</span></div>
+    </section>
+  )
+}
+
+function statusPresentation(status: MeasurementStatus) {
+  if (status === MeasurementStatus.OUT_OF_TOLERANCE) return { label: 'Critical', protocolLabel: 'OUT OF TOLERANCE', tone: 'critical' }
+  if (status === MeasurementStatus.WARNING) return { label: 'Warning', protocolLabel: 'WARNING', tone: 'warning' }
+  if (status === MeasurementStatus.NORMAL) return { label: 'Stable', protocolLabel: 'WITHIN TOLERANCE', tone: 'normal' }
+  return { label: 'Waiting', protocolLabel: 'AWAITING DATA', tone: 'muted' }
+}
+
+function formatSigned(value: number, suffix: string): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(3)}${suffix}`
+}

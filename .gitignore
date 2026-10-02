@@ -9,3 +9,6 @@ build/
 *.db-shm
 *.db-wal
 .superpowers/
+frontend/node_modules/
+frontend/dist/
+.filamentvision-runtime/
