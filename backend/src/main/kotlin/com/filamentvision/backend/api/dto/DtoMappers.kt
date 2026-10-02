@@ -10,6 +10,7 @@ import com.filamentvision.core.runtime.RuntimeSession
 import com.filamentvision.core.session.SessionStatistics
 import com.filamentvision.core.vision.CameraMeasurement
 import io.ktor.http.encodeURLPathPart
+import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
 
 private fun Double.safe(): Double? = takeIf { isFinite() }
 fun CameraMeasurement.toDto() = CameraMeasurementDto(cameraId.value, timestamp, sequence, pixelWidth?.safe(), diameterMm.safe(), confidence.safe(), valid, source.name)
@@ -33,6 +34,11 @@ fun DiagnosticsView.toDto() = DiagnosticsDto(metrics.elapsedMillis,
     metrics.counters.map { (key, value) -> CounterDto(key.name, value.toDto()) },
     metrics.latencies.map { (key, value) -> LatencyDto(key.name, value.count, value.totalMillis.safe(), value.maximumMillis.safe()) },
     queuedMeasurements, retainedSnapshots, retainedSnapshotBytes, backendVersion)
+fun UdpDiagnosticsSnapshot.toDto(cameraId: String) = UdpDiagnosticsDto(cameraId, transportMode.name,
+    datagramsReceived, bytesReceived, framesStarted, framesCompleted, framesDropped, duplicateChunks, outOfOrderChunks,
+    missingChunks, lateChunks, reassemblyTimeouts, invalidTransportHeaders, oversizedFrames, invalidHeaderCount,
+    invalidFooterCount, invalidPayloadSizeCount, decodeFailures, sourceFilteredDatagrams, oversizedOrTruncatedDatagrams,
+    lastPacketMonotonicNanos, lastValidFrameMonotonicNanos)
 // Repository error messages may contain platform details. Only a public machine code crosses HTTP.
 fun ErrorRecord.toDto() = ErrorRecordDto(id, sessionId, timestamp,
     code.takeIf { it.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) } ?: "DEVICE_ERROR", "Device error")

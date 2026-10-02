@@ -9,6 +9,7 @@ import com.filamentvision.backend.input.transport.*
 import com.filamentvision.core.frame.CameraId
 import com.filamentvision.core.input.*
 import java.net.InetSocketAddress
+import com.filamentvision.backend.input.diagnostics.UdpDiagnostics
 
 data class OwnedUdpPacket(
     val bytes: ByteArray,
@@ -26,10 +27,11 @@ sealed interface UdpCameraProcessResult {
     data class Rejected(val stage: UdpProcessingStage, val reason: String) : UdpCameraProcessResult
 }
 
-class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile) {
+class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile, private val diagnostics: UdpDiagnostics? = null) {
     private var sequence = 0L
 
-    fun process(packet: OwnedUdpPacket): UdpCameraProcessResult = try {
+    fun process(packet: OwnedUdpPacket): UdpCameraProcessResult {
+        val result = try {
         val completed = when (compiled.profile.transportMode) {
             TransportMode.SINGLE_DATAGRAM -> processSingle(packet)
             TransportMode.STRUCTURED_CHUNKED -> processStructured(packet)
@@ -43,6 +45,13 @@ class UdpCameraProcessor(private val compiled: CompiledUdpInputProfile) {
         rejected(error.stage, error.message.orEmpty())
     } catch (error: Throwable) {
         rejected(UdpProcessingStage.DECODER, error.message ?: error::class.simpleName.orEmpty())
+        }
+        when (result) {
+            is UdpCameraProcessResult.Accepted -> diagnostics?.frameCompleted(packet.receivedAtMonotonicNanos)
+            is UdpCameraProcessResult.Rejected -> diagnostics?.rejected(result.stage, result.reason)
+            UdpCameraProcessResult.Pending -> Unit
+        }
+        return result
     }
 
     private fun processSingle(packet: OwnedUdpPacket): FrameReassemblyResult {

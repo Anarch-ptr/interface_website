@@ -14,6 +14,7 @@ import com.filamentvision.core.vision.CameraMeasurement
 import com.filamentvision.core.alarm.*
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.runtime.UdpApplyOutcome
+import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
 
 internal val json = ObjectMapper()
 internal fun parse(body: String) = json.readTree(body)
@@ -68,6 +69,12 @@ internal class FakeBackend : BackendApplication {
     }
     override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView {
         record("applyUdpInput", deviceId, commandId, revision, expectedSavedRevision); return udpView(UdpApplyOutcome.APPLIED)
+    }
+    override suspend fun udpDiagnostics(deviceId: String, cameraId: String): UdpDiagnosticsSnapshot {
+        record("udpDiagnostics", deviceId, cameraId)
+        if (cameraId !in setOf("A", "B")) throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
+        return UdpDiagnosticsSnapshot(TransportMode.STRUCTURED_CHUNKED, 4, 400, 2, 1, 1,
+            0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 10, 11)
     }
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView { record("createDraft", deviceId, commandId, cameraId, configuration); return DraftView("draft1", cameraId, 1, configuration) }
     override suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView { record("updateDraft", deviceId, draftId, commandId, expectedRevision, configuration); return DraftView(draftId, "A", 2, configuration) }

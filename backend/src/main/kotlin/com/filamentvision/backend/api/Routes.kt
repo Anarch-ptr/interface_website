@@ -83,6 +83,10 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                 } }
                 get("/cameras") { api(correlationId) { reply(it, backend.cameras(id("deviceId")).map { camera -> camera.toDto() }) } }
                 get("/diagnostics") { api(correlationId) { reply(it, backend.diagnostics(id("deviceId")).toDto()) } }
+                get("/cameras/{cameraId}/udp-diagnostics") { api(correlationId) { correlation ->
+                    val camera = id("cameraId")
+                    reply(correlation, backend.udpDiagnostics(id("deviceId"), camera).toDto(camera))
+                } }
             }
             get("/sessions") { api(correlationId) { correlation ->
                 val page = backend.sessions(pageQuery("sessions"))

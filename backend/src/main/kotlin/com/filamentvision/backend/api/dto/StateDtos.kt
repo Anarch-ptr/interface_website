@@ -16,3 +16,10 @@ data class CounterDto(val name: String, val rate: RateDto)
 data class LatencyDto(val name: String, val count: Long, val totalMillis: Double?, val maximumMillis: Double?)
 data class DiagnosticsDto(val elapsedMillis: Long, val cameras: List<CameraMetricsDto>, val counters: List<CounterDto>,
     val latencies: List<LatencyDto>, val queuedMeasurements: Int, val retainedSnapshots: Int, val retainedSnapshotBytes: Long, val backendVersion: String)
+data class UdpDiagnosticsDto(val cameraId: String, val transportMode: String,
+    val datagramsReceived: Long, val bytesReceived: Long, val framesStarted: Long?, val framesCompleted: Long,
+    val framesDropped: Long, val duplicateChunks: Long?, val outOfOrderChunks: Long?, val missingChunks: Long?,
+    val lateChunks: Long?, val reassemblyTimeouts: Long?, val invalidTransportHeaders: Long, val oversizedFrames: Long,
+    val invalidHeader: Long, val invalidFooter: Long, val invalidPayloadSize: Long, val decodeFailures: Long,
+    val sourceFilteredDatagrams: Long, val oversizedOrTruncatedDatagrams: Long,
+    val lastPacketMonotonicNanos: Long?, val lastValidFrameMonotonicNanos: Long?)

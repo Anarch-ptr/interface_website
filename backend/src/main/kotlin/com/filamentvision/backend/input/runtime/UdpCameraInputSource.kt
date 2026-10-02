@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.filamentvision.backend.input.diagnostics.*
 
 class UdpCameraInputSource(
     profiles: UdpInputProfileSet,
@@ -18,9 +19,21 @@ class UdpCameraInputSource(
     private val profileSet = profiles.also {
         require(UdpInputProfileValidator().validate(it).isValid) { "UDP input profiles are invalid" }
     }
+    private val udpDiagnostics = listOf(profileSet.cameraA, profileSet.cameraB).associate { it.cameraId to UdpDiagnostics(it.transportMode) }
     private val processors = listOf(profileSet.cameraA, profileSet.cameraB)
         .filter { it.enabled }
-        .associate { it.cameraId to UdpCameraProcessor(CompiledUdpInputProfile.compile(it)) }
+        .associate {
+            val diagnostics = udpDiagnostics.getValue(it.cameraId)
+            val observer = object : com.filamentvision.backend.input.reassembly.StructuredReassemblyObserver {
+                override fun onFrameStarted() = diagnostics.frameStarted()
+                override fun onDuplicateChunk() = diagnostics.chunkDuplicate()
+                override fun onOutOfOrderChunk() = diagnostics.chunkOutOfOrder()
+                override fun onLateChunk() = diagnostics.lateChunk()
+                override fun onTimeout(missingChunks: Int) = diagnostics.reassemblyTimeout(missingChunks.toLong())
+                override fun onEvicted(missingChunks: Int) = diagnostics.reassemblyEviction(missingChunks.toLong())
+            }
+            it.cameraId to UdpCameraProcessor(CompiledUdpInputProfile.compile(it, observer), diagnostics)
+        }
     private val receivers = mutableMapOf<UdpCameraId, UdpReceiver>()
     private val mailboxLock = Any()
     private val pending = linkedMapOf<UdpCameraId, CameraInput>()
@@ -54,6 +67,7 @@ class UdpCameraInputSource(
 
     val pendingInputCount: Int get() = synchronized(mailboxLock) { pending.size }
     fun preAdmissionDroppedInputs(cameraId: UdpCameraId): Long = synchronized(mailboxLock) { drops.getValue(cameraId) }
+    fun udpDiagnostics(cameraId: UdpCameraId): UdpDiagnosticsSnapshot = udpDiagnostics.getValue(cameraId).snapshot()
 
     override suspend fun start() = lifecycle.withLock {
         if (activeProducerCount == 1) return@withLock
@@ -62,7 +76,12 @@ class UdpCameraInputSource(
         try {
             for (profile in listOf(profileSet.cameraA, profileSet.cameraB).filter { it.enabled }) {
                 val processor = processors.getValue(profile.cameraId)
-                val receiver = UdpReceiver(profile) { datagram ->
+                val cameraDiagnostics = udpDiagnostics.getValue(profile.cameraId)
+                val receiver = UdpReceiver(profile, object : UdpReceiverObserver {
+                    override fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = cameraDiagnostics.datagramReceived(size, receivedAtMonotonicNanos)
+                    override fun onSourceFiltered(datagram: ReceivedDatagram) = cameraDiagnostics.sourceFiltered()
+                    override fun onDropped(reason: UdpReceiverDropReason) = cameraDiagnostics.datagramTooLargeOrTruncated()
+                }) { datagram ->
                     val result = datagram.bytes.withBytes { bytes, size ->
                         processor.process(
                             OwnedUdpPacket(bytes, size, datagram.source, datagram.receivedAtMonotonicNanos, datagram.receivedAtEpochMillis),

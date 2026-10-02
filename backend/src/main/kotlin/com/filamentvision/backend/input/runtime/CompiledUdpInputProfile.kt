@@ -14,7 +14,7 @@ data class CompiledUdpInputProfile(
     val decoder: PayloadDecoder,
 ) {
     companion object {
-        fun compile(profile: UdpInputProfile): CompiledUdpInputProfile {
+        fun compile(profile: UdpInputProfile, reassemblyObserver: StructuredReassemblyObserver = object : StructuredReassemblyObserver {}): CompiledUdpInputProfile {
             val limits = profile.transportLimits
             val reassembler = when (profile.transportMode) {
                 TransportMode.SINGLE_DATAGRAM -> SingleDatagramFrameReassembler(limits.maxFrameBytes)
@@ -27,6 +27,7 @@ data class CompiledUdpInputProfile(
                         limits.maxFrameBytes.toLong() * limits.maxInFlightFrames,
                     ),
                     frameTimeoutNanos = limits.frameTimeoutMs * 1_000_000,
+                    observer = reassemblyObserver,
                 )
             }
             return CompiledUdpInputProfile(

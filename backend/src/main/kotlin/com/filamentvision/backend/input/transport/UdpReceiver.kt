@@ -29,6 +29,7 @@ enum class UdpReceiverState { IDLE, RUNNING, ERROR }
 enum class UdpReceiverDropReason { DATAGRAM_TOO_LARGE_OR_TRUNCATED }
 
 interface UdpReceiverObserver {
+    fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = Unit
     fun onSourceFiltered(datagram: ReceivedDatagram) = Unit
     fun onDropped(reason: UdpReceiverDropReason) = Unit
     fun onFailure(error: Throwable) = Unit
@@ -133,6 +134,7 @@ class UdpReceiver(
                     bytes = BorrowedDatagramBytes(receiveArray, receivedSize),
                 )
                 try {
+                    observer.onReceived(receivedSize, datagram.receivedAtMonotonicNanos)
                     if (!sourceFilter.accepts(source)) {
                         observer.onSourceFiltered(datagram)
                     } else if (receiveCapacity.sentinelEnabled && receivedSize == receiveCapacity.receiveCapacity) {

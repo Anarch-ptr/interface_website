@@ -10,6 +10,7 @@ class StructuredChunkFrameReassembler(
     private val maxBufferedBytes: Long = 32L * 1024 * 1024,
     private val frameTimeoutNanos: Long = 1_000_000_000,
     private val maxTombstones: Int = 64,
+    private val observer: StructuredReassemblyObserver = object : StructuredReassemblyObserver {},
 ) : FrameReassembler {
     private data class FrameKey(
         val cameraId: UdpCameraId,
@@ -24,6 +25,7 @@ class StructuredChunkFrameReassembler(
         val firstReceivedAtMonotonicNanos: Long,
         val firstReceivedAtEpochMillis: Long,
         val chunks: Array<ByteArray?>,
+        var receivedChunkCount: Int = 0,
     )
 
     private val frames = linkedMapOf<FrameKey, InFlightFrame>()
@@ -65,6 +67,7 @@ class StructuredChunkFrameReassembler(
             remove(key, frame)
             addTombstone(key, nowMonotonicNanos)
             reassemblyTimeouts++
+            observer.onTimeout(frame.chunks.count { it == null })
         }
         return expired.size
     }
@@ -75,6 +78,7 @@ class StructuredChunkFrameReassembler(
         val key = FrameKey(input.cameraId, input.source, input.frameId)
         if (timeoutTombstones.containsKey(key)) {
             lateChunks++
+            observer.onLateChunk()
             return FrameReassemblyResult.Dropped(FrameDropReason.LATE_CHUNK)
         }
         if (input.framePayloadBytes > maxFrameBytes) {
@@ -85,9 +89,11 @@ class StructuredChunkFrameReassembler(
         }
         if (!frames.containsKey(key) && frames.size >= maxInFlightFrames) {
             val oldest = frames.entries.first()
+            observer.onEvicted(oldest.value.chunks.count { it == null })
             remove(oldest.key, oldest.value)
             inFlightEvictions++
         }
+        val isNewFrame = !frames.containsKey(key)
         val frame = frames.getOrPut(key) {
             InFlightFrame(
                 chunkCount = input.chunkCount,
@@ -98,6 +104,7 @@ class StructuredChunkFrameReassembler(
                 chunks = arrayOfNulls(input.chunkCount),
             )
         }
+        if (isNewFrame) observer.onFrameStarted()
 
         if (
             frame.chunkCount != input.chunkCount ||
@@ -111,6 +118,7 @@ class StructuredChunkFrameReassembler(
         val ownedChunk = input.payload.copyOfRange(input.payloadOffset, input.payloadOffset + input.payloadLength)
         val prior = frame.chunks[input.chunkIndex]
         if (prior != null) {
+            observer.onDuplicateChunk()
             return if (prior.contentEquals(ownedChunk)) {
                 identicalDuplicateChunks++
                 FrameReassemblyResult.Pending
@@ -121,6 +129,8 @@ class StructuredChunkFrameReassembler(
             }
         }
 
+        if (input.chunkIndex != frame.receivedChunkCount) observer.onOutOfOrderChunk()
+
         if (!makeRoomFor(key, frame, ownedChunk.size.toLong())) {
             remove(key, frame)
             bufferBudgetDrops++
@@ -128,6 +138,7 @@ class StructuredChunkFrameReassembler(
         }
 
         frame.chunks[input.chunkIndex] = ownedChunk
+        frame.receivedChunkCount++
         retainedBytes += ownedChunk.size
         val currentFrameBytes = frame.chunks.sumOf { it?.size?.toLong() ?: 0L }
         if (currentFrameBytes > frame.framePayloadBytes) {
@@ -172,6 +183,7 @@ class StructuredChunkFrameReassembler(
         if (incomingBytes > maxBufferedBytes) return false
         while (retainedBytes + incomingBytes > maxBufferedBytes) {
             val oldestOther = frames.entries.firstOrNull { it.key != currentKey } ?: return false
+            observer.onEvicted(oldestOther.value.chunks.count { it == null })
             remove(oldestOther.key, oldestOther.value)
             inFlightEvictions++
         }
@@ -198,4 +210,13 @@ class StructuredChunkFrameReassembler(
         const val HARD_MAX_CHUNK_COUNT = 8_192
         const val HARD_MAX_BUFFERED_BYTES = 64L * 1024 * 1024
     }
+}
+
+interface StructuredReassemblyObserver {
+    fun onFrameStarted() = Unit
+    fun onDuplicateChunk() = Unit
+    fun onOutOfOrderChunk() = Unit
+    fun onLateChunk() = Unit
+    fun onTimeout(missingChunks: Int) = Unit
+    fun onEvicted(missingChunks: Int) = Unit
 }

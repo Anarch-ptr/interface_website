@@ -6,6 +6,7 @@ import com.filamentvision.backend.preview.PngPreviewEncoder
 import com.filamentvision.backend.simulator.*
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.runtime.*
+import com.filamentvision.backend.input.diagnostics.UdpDiagnostics
 import com.filamentvision.backend.snapshot.FileSnapshotObjectStore
 import com.filamentvision.core.alarm.AlarmTransition
 import com.filamentvision.core.config.*
@@ -59,6 +60,10 @@ class BackendComposition private constructor(
     @Volatile internal var applied = initial.configuration
     @Volatile internal var revisions = initialRevisions
     internal val commands = Mutex()
+    internal val udpDiagnostics = mapOf(
+        UdpCameraId.A to UdpDiagnostics(udpInputRouter.effectiveProfiles.cameraA.transportMode),
+        UdpCameraId.B to UdpDiagnostics(udpInputRouter.effectiveProfiles.cameraB.transportMode),
+    )
     internal var closed = false
     private val statePublicationLock = Any()
     private var finalizedAwaitingState: String? = null
