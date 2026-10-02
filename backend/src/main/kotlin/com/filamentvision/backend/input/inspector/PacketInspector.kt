@@ -66,10 +66,11 @@ class PacketInspector(
         return true
     }
 
-    @Synchronized fun latest(leaseId: String, cameraId: UdpCameraId): PacketInspectorSnapshot? {
+    @Synchronized fun latest(leaseId: String, cameraId: UdpCameraId, previewBytes: Int? = null): PacketInspectorSnapshot? {
         expire()
         val lease = leases[leaseId]?.takeIf { it.cameraId == cameraId } ?: return null
-        return snapshots[cameraId]?.bounded(lease.previewBytes)
+        previewBytes?.let { require(it in ALLOWED_PREVIEW_BYTES) }
+        return snapshots[cameraId]?.bounded(minOf(lease.previewBytes, previewBytes ?: lease.previewBytes))
     }
 
     @get:Synchronized val retainedSnapshotCount: Int get() { expire(); return snapshots.size }

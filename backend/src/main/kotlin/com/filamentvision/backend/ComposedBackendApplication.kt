@@ -119,6 +119,21 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
         "B" -> com.filamentvision.backend.input.profile.UdpCameraId.B
         else -> { device(deviceId); missing() }
     }]!!.snapshot().also { device(deviceId) }
+    private fun udpCamera(deviceId: String, cameraId: String): com.filamentvision.backend.input.profile.UdpCameraId {
+        device(deviceId)
+        return when (cameraId) {
+            "A" -> com.filamentvision.backend.input.profile.UdpCameraId.A
+            "B" -> com.filamentvision.backend.input.profile.UdpCameraId.B
+            else -> missing()
+        }
+    }
+    override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int) =
+        c.packetInspector.createLease(udpCamera(deviceId, cameraId), previewBytes)
+    override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String) {
+        if (!c.packetInspector.releaseLease(leaseId, udpCamera(deviceId, cameraId))) missing()
+    }
+    override suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int) =
+        c.packetInspector.latest(leaseId, udpCamera(deviceId, cameraId), previewBytes) ?: missing()
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView {
         device(deviceId); if (cameraId !in setOf("A", "B")) missing()
         return dedup("createDraft", commandId) {

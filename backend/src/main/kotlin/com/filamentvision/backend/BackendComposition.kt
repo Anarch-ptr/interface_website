@@ -7,6 +7,7 @@ import com.filamentvision.backend.simulator.*
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.runtime.*
 import com.filamentvision.backend.input.diagnostics.UdpDiagnostics
+import com.filamentvision.backend.input.inspector.PacketInspector
 import com.filamentvision.backend.snapshot.FileSnapshotObjectStore
 import com.filamentvision.core.alarm.AlarmTransition
 import com.filamentvision.core.config.*
@@ -64,6 +65,7 @@ class BackendComposition private constructor(
         UdpCameraId.A to UdpDiagnostics(udpInputRouter.effectiveProfiles.cameraA.transportMode),
         UdpCameraId.B to UdpDiagnostics(udpInputRouter.effectiveProfiles.cameraB.transportMode),
     )
+    internal val packetInspector = PacketInspector()
     internal var closed = false
     private val statePublicationLock = Any()
     private var finalizedAwaitingState: String? = null

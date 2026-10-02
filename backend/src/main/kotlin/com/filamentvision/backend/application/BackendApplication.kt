@@ -7,6 +7,7 @@ import com.filamentvision.core.runtime.*
 import com.filamentvision.backend.input.profile.UdpInputProfileSet
 import com.filamentvision.backend.input.runtime.UdpApplyOutcome
 import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
+import com.filamentvision.backend.input.inspector.*
 
 /** Application boundary only. Composition owns scheduling, resource lookup, command deduplication,
  * preconditions and runtime/repository coordination; HTTP never owns a producer or a file path.
@@ -34,6 +35,9 @@ interface BackendApplication {
     suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView
     suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView
     suspend fun udpDiagnostics(deviceId: String, cameraId: String): UdpDiagnosticsSnapshot
+    suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): PacketInspectorLease
+    suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String)
+    suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot
     suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView
     suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView
     suspend fun deleteDraft(deviceId: String, draftId: String, commandId: String): Unit

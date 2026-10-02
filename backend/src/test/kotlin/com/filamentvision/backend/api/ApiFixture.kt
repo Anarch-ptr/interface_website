@@ -15,6 +15,8 @@ import com.filamentvision.core.alarm.*
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.runtime.UdpApplyOutcome
 import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
+import com.filamentvision.backend.input.inspector.*
+import java.net.InetSocketAddress
 
 internal val json = ObjectMapper()
 internal fun parse(body: String) = json.readTree(body)
@@ -36,6 +38,7 @@ internal class FakeBackend : BackendApplication {
     var startOutcome = StartOutcome.STARTED
     var stopError: String? = null
     var snapshotContent = SnapshotContent(byteArrayOf(1, 0, -1, 10), "image/png", "capture.png")
+    var inspectorAvailable = true
     private fun record(name: String, vararg args: Any?) { calls += name to args.toList(); failure?.let { throw it } }
     private val starts = mutableMapOf<String, StartResult>()
     private val stops = mutableMapOf<String, StopResult>()
@@ -75,6 +78,23 @@ internal class FakeBackend : BackendApplication {
         if (cameraId !in setOf("A", "B")) throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
         return UdpDiagnosticsSnapshot(TransportMode.STRUCTURED_CHUNKED, 4, 400, 2, 1, 1,
             0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 10, 11)
+    }
+    override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): PacketInspectorLease {
+        record("createPacketInspectorLease", deviceId, cameraId, previewBytes)
+        if (cameraId !in setOf("A", "B")) throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
+        return PacketInspectorLease("lease-$cameraId", UdpCameraId.valueOf(cameraId), previewBytes, 9999)
+    }
+    override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String) {
+        record("releasePacketInspectorLease", deviceId, cameraId, leaseId)
+        if (cameraId != "A" || leaseId != "lease-A") throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
+    }
+    override suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot {
+        record("packetInspectorSnapshot", deviceId, cameraId, leaseId, previewBytes)
+        if (!inspectorAvailable || cameraId != "A") throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
+        return PacketInspectorSnapshot(7, UdpCameraId.A,
+            RawDatagramInspection("127.0.0.1", 9000, 3, 10, RawParseStatus.SOURCE_IP_MISMATCH,
+                byteArrayOf(0xAA.toByte(), 0x0F, 0xFF.toByte()), TransportInspection(42, 1, 3, 100, 3, 9)),
+            ParsedFrameInspection("GRAY8", "VALID", 2, 1, 11, byteArrayOf(1, 2)))
     }
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView { record("createDraft", deviceId, commandId, cameraId, configuration); return DraftView("draft1", cameraId, 1, configuration) }
     override suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView { record("updateDraft", deviceId, draftId, commandId, expectedRevision, configuration); return DraftView(draftId, "A", 2, configuration) }

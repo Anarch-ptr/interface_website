@@ -87,6 +87,25 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                     val camera = id("cameraId")
                     reply(correlation, backend.udpDiagnostics(id("deviceId"), camera).toDto(camera))
                 } }
+                post("/cameras/{cameraId}/packet-inspector/lease") { api(correlationId) { correlation ->
+                    val request = body<CreatePacketInspectorLeaseRequest>()
+                    valid(request.previewBytes in com.filamentvision.backend.input.inspector.PacketInspector.ALLOWED_PREVIEW_BYTES)
+                    reply(correlation, backend.createPacketInspectorLease(id("deviceId"), id("cameraId"), request.previewBytes).toDto(), HttpStatusCode.Created)
+                } }
+                delete("/cameras/{cameraId}/packet-inspector/lease/{leaseId}") { api(correlationId) { correlation ->
+                    backend.releasePacketInspectorLease(id("deviceId"), id("cameraId"), id("leaseId"))
+                    reply(correlation, DeletedDto())
+                } }
+                get("/cameras/{cameraId}/packet-inspector") { api(correlationId) { correlation ->
+                    val leaseId = query("leaseId").orEmpty().also { valid(it.isNotBlank()) }
+                    val previewBytes = query("previewBytes")?.toIntOrNull() ?: throw ApplicationFailure(ApplicationFailureCode.INVALID)
+                    valid(previewBytes in com.filamentvision.backend.input.inspector.PacketInspector.ALLOWED_PREVIEW_BYTES)
+                    val snapshot = backend.packetInspectorSnapshot(id("deviceId"), id("cameraId"), leaseId, previewBytes)
+                    val etag = "\"${snapshot.sequence}\""
+                    call.response.header(HttpHeaders.ETag, etag)
+                    if (call.request.headers[HttpHeaders.IfNoneMatch] == etag) call.respond(HttpStatusCode.NotModified)
+                    else reply(correlation, snapshot.toDto())
+                } }
             }
             get("/sessions") { api(correlationId) { correlation ->
                 val page = backend.sessions(pageQuery("sessions"))
