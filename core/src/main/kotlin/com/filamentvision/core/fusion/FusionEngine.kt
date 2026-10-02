@@ -26,7 +26,8 @@ class FusionEngine {
         var validA = cameraA?.takeIf { it.valid && it.confidence >= profile.minimumConfidence }
         var validB = cameraB?.takeIf { it.valid && it.confidence >= profile.minimumConfidence }
         val timestampsCompatible = cameraA == null || cameraB == null ||
-            abs(cameraA.timestamp - cameraB.timestamp) <= profile.maximumTimestampDifferenceMillis
+            monotonicDifference(cameraA.receivedAtMonotonicNanos, cameraB.receivedAtMonotonicNanos) <=
+            profile.maximumTimestampDifferenceMillis * 1_000_000L
         var reason = when {
             validA == null && cameraA != null -> FusionReason.CAMERA_A_LOW_CONFIDENCE
             validB == null && cameraB != null -> FusionReason.CAMERA_B_LOW_CONFIDENCE
@@ -36,7 +37,7 @@ class FusionEngine {
         }
         if (validA != null && validB != null && !timestampsCompatible) {
             reason = FusionReason.TIMESTAMP_MISMATCH
-            if (validA.timestamp >= validB.timestamp) validB = null else validA = null
+            if (validA.receivedAtMonotonicNanos >= validB.receivedAtMonotonicNanos) validB = null else validA = null
         }
         if (validA == null && validB == null) return null
         val fused = when {
@@ -71,4 +72,7 @@ class FusionEngine {
             timestampsCompatible = timestampsCompatible,
         )
     }
+
+    private fun monotonicDifference(left: Long, right: Long): Long =
+        if (left >= right) left - right else right - left
 }

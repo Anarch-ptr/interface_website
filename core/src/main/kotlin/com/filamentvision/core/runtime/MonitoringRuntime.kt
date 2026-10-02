@@ -23,7 +23,7 @@ import java.util.UUID
 @OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
 class MonitoringRuntime(
     scope: CoroutineScope,
-    private val source: ImageInputSource,
+    private val source: CameraInputSource,
     configurations: Map<CameraId, VisionConfiguration>,
     private val pairingStrategy: FramePairingStrategy,
     private var fusionConfiguration: FusionConfiguration,
@@ -35,6 +35,7 @@ class MonitoringRuntime(
     private val sessionId: () -> String = { UUID.randomUUID().toString() },
     private val processor: VisionProcessor = VisionProcessor(),
     private val fusionEngine: FusionEngine = FusionEngine(),
+    private val directDiameterFusionConfidence: Map<CameraId, Double> = emptyMap(),
     realtimeCapacity: Int = 300,
     private var writeBatchSize: Int = 8,
     private var flushIntervalMillis: Long = 1000,
@@ -196,8 +197,8 @@ class MonitoringRuntime(
                 launch {
                     for (tick in flushTicks) flushMeasurements(reservation)
                 }
-                source.frames.collect { accept(reservation, it) }
-                error("Image input completed")
+                source.inputs.collect { accept(reservation, it) }
+                error("Camera input completed")
             }
         } catch (error: Throwable) {
             failure = error
@@ -212,13 +213,22 @@ class MonitoringRuntime(
         }
     }
 
-    private suspend fun accept(reservation: RuntimeOwnership.Reservation, frame: CameraFrame) {
+    private suspend fun accept(reservation: RuntimeOwnership.Reservation, input: CameraInput) {
         try {
             processing.withLock {
                 val accepting = ownership.transition { ownership.current === reservation && reservation.accepting }
                 if (!accepting) return@withLock
-                val configuration = requireNotNull(configurations[frame.cameraId]) { "No configuration for ${frame.cameraId}" }
-                val camera = processor.process(frame, configuration).measurement ?: return@withLock
+                val camera = when (input) {
+                    is CameraInput.Image -> {
+                        val frame = input.frame
+                        val configuration = requireNotNull(configurations[frame.cameraId]) { "No configuration for ${frame.cameraId}" }
+                        processor.process(frame, configuration).measurement ?: return@withLock
+                    }
+                    is CameraInput.DirectDiameter -> DirectDiameterMeasurementAdapter.toMeasurement(
+                        input.evidence,
+                        directDiameterFusionConfidence[input.cameraId] ?: 1.0,
+                    )
+                }
                 for (pair in pairingStrategy.offer(camera)) {
                     val measurement = fusionEngine.fuseDetailed(pair.cameraA, pair.cameraB, fusionConfiguration)?.measurement ?: continue
                     val flush = ownership.transition {
@@ -241,7 +251,9 @@ class MonitoringRuntime(
                     if (flush) flushMeasurements(reservation, thresholdOnly = true)
                 }
             }
-        } finally { frame.close() }
+        } finally {
+            if (input is CameraInput.Image) input.frame.close()
+        }
     }
 
     /** Called only inside the transition lock. Never joins the worker on its own stack. */

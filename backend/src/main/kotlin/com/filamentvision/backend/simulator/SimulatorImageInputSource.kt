@@ -114,8 +114,10 @@ class SimulatorImageInputSource(
                         val sequence = sequences.getValue(camera)
                         sequences[camera] = sequence + 1
                         val captured = epoch + if (currentScenario == SimulationScenario.TIMESTAMP_MISMATCH && camera == cameraBId) 500 else 0
+                        val receivedForCamera = received +
+                            if (currentScenario == SimulationScenario.TIMESTAMP_MISMATCH && camera == cameraBId) 500_000_000 else 0
                         lastEpochMillis = maxOf(lastEpochMillis, captured)
-                        offer(factory.create(camera, captured, received, sequence, currentScenario, scenarioTick, camera == cameraAId))
+                        offer(factory.create(camera, captured, receivedForCamera, sequence, currentScenario, scenarioTick, camera == cameraAId))
                     }
                     scenarioTick++
                     delay(framePeriodMillis)

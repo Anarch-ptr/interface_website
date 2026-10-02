@@ -25,6 +25,7 @@ data class CameraMeasurement(
     val rightEdge: Int? = null,
     val error: DetectionError? = null,
     val source: CameraMeasurementSource = CameraMeasurementSource.VISION,
+    val receivedAtMonotonicNanos: Long = timestamp * 1_000_000,
 )
 
 class DetectionPipeline {
@@ -71,6 +72,7 @@ class DetectionPipeline {
             frame.capturedAtEpochMillis, frame.sequence, valid,
             calibration.roiLeft, calibration.roiTop, calibration.roiRight, calibration.roiBottom,
             left, right, if (valid) null else DetectionError.LOW_CONFIDENCE,
+            receivedAtMonotonicNanos = frame.receivedAtMonotonicNanos,
         )
     }
 
@@ -103,6 +105,7 @@ class DetectionPipeline {
         frame.cameraId, 0.0, 0.0, 0.0, frame.capturedAtEpochMillis, frame.sequence, false,
         calibration.roiLeft, calibration.roiTop, calibration.roiRight, calibration.roiBottom,
         error = error,
+        receivedAtMonotonicNanos = frame.receivedAtMonotonicNanos,
     )
 
     private fun median(values: List<Double>): Double = if (values.size % 2 == 1) values[values.size / 2]
