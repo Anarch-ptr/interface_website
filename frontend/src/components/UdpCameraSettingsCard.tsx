@@ -1,12 +1,14 @@
 import type { FieldError, PayloadFormat, UdpCameraProfile, UdpPayload } from '../domain/udpInput'
 import { UdpDiagnosticsPanel } from './UdpDiagnosticsPanel'
 import type { UdpDiagnostics } from '../domain/udpInput'
+import type { BackendApiClient } from '../services/BackendApiClient'
+import { PacketInspector } from './PacketInspector'
 
 interface Props { camera: 'A' | 'B'; profile: UdpCameraProfile; errors: FieldError[]; diagnostics?: UdpDiagnostics;
-  onChange: (profile: UdpCameraProfile) => void }
+  api: BackendApiClient; deviceId: string; onChange: (profile: UdpCameraProfile) => void }
 const number = (value: string) => value === '' ? 0 : Number(value)
 
-export function UdpCameraSettingsCard({ camera, profile, errors, diagnostics, onChange }: Props) {
+export function UdpCameraSettingsCard({ camera, profile, errors, diagnostics, api, deviceId, onChange }: Props) {
   const set = <K extends keyof UdpCameraProfile>(key: K, value: UdpCameraProfile[K]) => onChange({ ...profile, [key]: value })
   const payload = (next: UdpPayload) => set('payload', next)
   const updatePayload = (patch: object) => payload({ ...profile.payload, ...patch } as UdpPayload)
@@ -25,7 +27,7 @@ export function UdpCameraSettingsCard({ camera, profile, errors, diagnostics, on
     {profile.payload.format === 'DIAMETER' && <DiameterFields camera={camera} payload={profile.payload} onChange={payload} />}
     {profile.transportMode === 'STRUCTURED_CHUNKED' && <details className="udp-advanced"><summary>Advanced Transport</summary><p>Transport Header: fixed FVU1 protocol v1</p>{(['maxInFlightFrames','maxFrameBytes','frameTimeoutMs','maxChunkCount','maxChunkPayloadBytes'] as const).map((key) => <Field key={key} label={key}><input aria-label={`Camera ${camera} ${key}`} type="number" value={profile.transportLimits[key]} onChange={(e) => set('transportLimits', { ...profile.transportLimits, [key]: number(e.target.value) })} /></Field>)}</details>}
     <details className="udp-advanced"><summary>Advanced UDP Framing</summary><p>Application Header / Footer (separate from Transport Header)</p>{(['header','footer'] as const).map((part) => <fieldset key={part}><legend>{part === 'header' ? 'Application Header' : 'Application Footer'}</legend><label><input type="checkbox" checked={profile.applicationFraming[`${part}Enabled`]} onChange={(e) => set('applicationFraming', { ...profile.applicationFraming, [`${part}Enabled`]: e.target.checked })} /> Enabled</label><select aria-label={`Camera ${camera} ${part} format`} value={profile.applicationFraming[`${part}Format`]} onChange={(e) => set('applicationFraming', { ...profile.applicationFraming, [`${part}Format`]: e.target.value })}><option>HEX</option><option>ASCII</option></select><input aria-label={`Camera ${camera} ${part} bytes`} value={profile.applicationFraming[`${part}Bytes`]} onChange={(e) => set('applicationFraming', { ...profile.applicationFraming, [`${part}Bytes`]: e.target.value })} /><select aria-label={`Camera ${camera} ${part} scope`} value={profile.applicationFraming[`${part}Scope`]} onChange={(e) => set('applicationFraming', { ...profile.applicationFraming, [`${part}Scope`]: e.target.value })}><option>DATAGRAM</option><option>FRAME</option></select></fieldset>)}</details>
-    <h4>Diagnostics</h4><UdpDiagnosticsPanel diagnostics={diagnostics} />
+    <h4>Diagnostics</h4><UdpDiagnosticsPanel diagnostics={diagnostics} /><PacketInspector api={api} deviceId={deviceId} camera={camera} />
   </section>
 }
 

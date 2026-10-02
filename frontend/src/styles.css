@@ -191,6 +191,16 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
 .udp-diagnostics dd { margin: 3px 0 0; font: .72rem Consolas, monospace; }
 .revision-badges { display: flex; gap: 8px; }
 .revision-badges span { padding: 7px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .68rem; }
+.inspector-open { margin: 16px 22px 0; }
+.packet-inspector { margin: 14px 22px 0; padding: 12px; border: 1px solid rgba(89,212,198,.3); border-radius: 9px; background: rgba(7,13,18,.62); }
+.inspector-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.inspector-toolbar strong { margin-right: auto; }
+.inspector-toolbar select, .inspector-toolbar button, .inspector-actions button { padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); }
+.inspector-region { margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; }
+.inspector-region h5 { display: inline; margin-right: 8px; }
+.inspector-region span, .inspector-region small { color: var(--quiet); font-size: .64rem; }
+.inspector-region pre { max-height: 110px; overflow: auto; white-space: pre-wrap; color: var(--primary); font: .67rem Consolas, monospace; }
+.inspector-actions { margin-top: 10px; display: flex; gap: 8px; }
 
 @media (max-width: 1180px) {
   .app-shell { grid-template-columns: 86px minmax(0, 1fr); }
