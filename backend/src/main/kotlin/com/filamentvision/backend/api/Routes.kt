@@ -56,6 +56,19 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                     val request = body<SaveConfigurationRequest>(); command(request.commandId)
                     configurationReply(correlation, backend.saveAndApply(id("deviceId"), request.commandId, request.configuration.toDomain()))
                 } }
+                get("/udp-input-configuration") { api(correlationId) {
+                    reply(it, backend.udpInputConfiguration(id("deviceId")).toDto())
+                } }
+                put("/udp-input-configuration") { api(correlationId) { correlation ->
+                    val request = body<SaveUdpInputConfigurationRequest>(); command(request.commandId)
+                    reply(correlation, backend.saveUdpInput(id("deviceId"), request.commandId, request.configuration.toDomain()).toDto())
+                } }
+                post("/udp-input-configuration/apply") { api(correlationId) { correlation ->
+                    val request = body<ApplyUdpInputConfigurationRequest>(); command(request.commandId)
+                    valid(request.revision > 0 && request.expectedSavedRevision > 0)
+                    reply(correlation, backend.applyUdpInput(id("deviceId"), request.commandId, request.revision,
+                        request.expectedSavedRevision).toDto())
+                } }
                 post("/calibration/drafts") { api(correlationId) { correlation ->
                     val request = body<CreateDraftRequest>(); command(request.commandId); valid(request.cameraId.isNotBlank())
                     reply(correlation, backend.createDraft(id("deviceId"), request.commandId, request.cameraId, request.configuration.toDomain()).toDto(), HttpStatusCode.Created)
@@ -138,7 +151,7 @@ private suspend fun RoutingContext.configurationReply(correlation: String, view:
         throw ApiHttpFailure(HttpStatusCode.Conflict, "REQUIRES_STOP", "Stop monitoring before applying this revision", RevisionDetailsDto(view.revisions.savedRevision, view.revisions.appliedRevision))
     reply(correlation, view.toDto())
 }
-private class ApiHttpFailure(val status: HttpStatusCode, val code: String, val safeMessage: String, val details: RevisionDetailsDto? = null) : RuntimeException()
+private class ApiHttpFailure(val status: HttpStatusCode, val code: String, val safeMessage: String, val details: Any? = null) : RuntimeException()
 private suspend fun RoutingContext.api(generator: () -> String, block: suspend (String) -> Unit) {
     val correlation = generator().takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,128}")) } ?: UUID.randomUUID().toString()
     call.response.header("X-Correlation-Id", correlation)
@@ -147,6 +160,8 @@ private suspend fun RoutingContext.api(generator: () -> String, block: suspend (
     catch (failure: Exception) {
         val mapped = when (failure) {
             is ApiHttpFailure -> failure
+            is UdpInputValidationException -> ApiHttpFailure(HttpStatusCode.BadRequest, "INVALID_REQUEST", "Invalid request",
+                UdpValidationDetailsDto(failure.errors.map { FieldValidationErrorDto(it.path, it.message) }))
             is ApplicationFailure -> when (failure.code) {
                 ApplicationFailureCode.INVALID -> badRequest()
                 ApplicationFailureCode.NOT_FOUND -> ApiHttpFailure(HttpStatusCode.NotFound, "NOT_FOUND", "Resource not found")

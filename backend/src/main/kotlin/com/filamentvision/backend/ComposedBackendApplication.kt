@@ -4,6 +4,8 @@ import com.filamentvision.backend.application.*
 import com.filamentvision.core.config.*
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
+import com.filamentvision.backend.input.profile.UdpInputProfileSet
+import com.filamentvision.backend.input.runtime.*
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -23,6 +25,7 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
             override fun publishConfiguration(configuration: MonitoringConfiguration) { c.applied = configuration }
         })
     })
+    private val udpService = UdpInputConfigurationService(c.udpProfileRepository, c.udpInputRouter)
     private fun device(id: String) { if (id != c.deviceId) missing() }
     private fun missing(): Nothing = throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
     private fun conflict(): Nothing = throw ApplicationFailure(ApplicationFailureCode.CONFLICT)
@@ -87,6 +90,29 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
     }
     override suspend fun saveAndApply(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView {
         device(deviceId); return dedup("saveAndApply", commandId) { configurationChanged(c.io { service.saveAndApply(configuration) }) }
+    }
+    private suspend fun udpView(outcome: UdpApplyOutcome? = null): UdpInputConfigurationView = c.io {
+        val saved = c.udpProfileRepository.latest()
+        UdpInputConfigurationView(saved.revision, c.udpProfileRepository.appliedRevision(), saved.profiles, outcome)
+    }
+    override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView {
+        device(deviceId); return udpView()
+    }
+    override suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView {
+        device(deviceId); return dedup("saveUdpInput", commandId) { c.io { udpService.save(profiles) }; udpView() }
+    }
+    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
+        expectedSavedRevision: Long): UdpInputConfigurationView {
+        device(deviceId); return dedup("applyUdpInput", commandId) {
+            when (val result = c.io { udpService.apply(revision, expectedSavedRevision) }) {
+                is UdpApplyResult -> when (result.outcome) {
+                    UdpApplyOutcome.APPLIED -> udpView(result.outcome)
+                    UdpApplyOutcome.CONFLICT -> throw ApplicationFailure(ApplicationFailureCode.CONFLICT)
+                    UdpApplyOutcome.NOT_FOUND -> missing()
+                    UdpApplyOutcome.INVALID -> throw ApplicationFailure(ApplicationFailureCode.INVALID)
+                }
+            }
+        }
     }
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView {
         device(deviceId); if (cameraId !in setOf("A", "B")) missing()

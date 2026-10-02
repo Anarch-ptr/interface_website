@@ -4,6 +4,8 @@ import com.filamentvision.core.config.*
 import com.filamentvision.core.metrics.MetricsSnapshot
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
+import com.filamentvision.backend.input.profile.UdpInputProfileSet
+import com.filamentvision.backend.input.runtime.UdpApplyOutcome
 
 /** Application boundary only. Composition owns scheduling, resource lookup, command deduplication,
  * preconditions and runtime/repository coordination; HTTP never owns a producer or a file path.
@@ -27,6 +29,9 @@ interface BackendApplication {
     suspend fun save(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView
     suspend fun apply(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): ConfigurationView
     suspend fun saveAndApply(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView
+    suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView
+    suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView
+    suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView
     suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView
     suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView
     suspend fun deleteDraft(deviceId: String, draftId: String, commandId: String): Unit
@@ -49,6 +54,8 @@ data class DeviceView(val deviceId: String, val connection: ConnectionState, val
     val cameras: List<CameraView>, val revisions: ConfigurationRevisions, val eventSequence: Long)
 data class ConfigurationView(val revisions: ConfigurationRevisions, val saved: ConfigurationRevision?,
     val outcome: ConfigurationApplyOutcome? = null)
+data class UdpInputConfigurationView(val savedRevision: Long, val appliedRevision: Long,
+    val configuration: UdpInputProfileSet, val outcome: UdpApplyOutcome? = null)
 data class DraftView(val id: String, val cameraId: String, val revision: Long, val configuration: VisionConfiguration)
 data class DiagnosticsView(val metrics: MetricsSnapshot, val queuedMeasurements: Int, val retainedSnapshots: Int,
     val retainedSnapshotBytes: Long, val backendVersion: String)

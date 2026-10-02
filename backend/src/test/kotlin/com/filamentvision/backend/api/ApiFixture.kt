@@ -12,6 +12,8 @@ import com.filamentvision.core.runtime.*
 import com.filamentvision.core.session.SessionStatistics
 import com.filamentvision.core.vision.CameraMeasurement
 import com.filamentvision.core.alarm.*
+import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.runtime.UdpApplyOutcome
 
 internal val json = ObjectMapper()
 internal fun parse(body: String) = json.readTree(body)
@@ -37,6 +39,14 @@ internal class FakeBackend : BackendApplication {
     private val starts = mutableMapOf<String, StartResult>()
     private val stops = mutableMapOf<String, StopResult>()
     private fun view(c: MonitoringConfiguration = MonitoringConfiguration()) = ConfigurationView(ConfigurationRevisions(3, 2), ConfigurationRevision(3, c), configOutcome)
+    private val udpProfiles = UdpInputProfileSet(
+        UdpInputProfile(UdpCameraId.A, true, "127.0.0.1", 5101, TransportMode.STRUCTURED_CHUNKED,
+            PayloadProfile.Gray8(32, 16), ApplicationFramingProfile(), TransportLimits()),
+        UdpInputProfile(UdpCameraId.B, true, null, 5102, TransportMode.SINGLE_DATAGRAM,
+            PayloadProfile.Diameter(DiameterValueEncoding.FLOAT32, DiameterByteOrder.LITTLE_ENDIAN),
+            ApplicationFramingProfile(), TransportLimits()))
+    private fun udpView(outcome: UdpApplyOutcome? = null, profiles: UdpInputProfileSet = udpProfiles) =
+        UdpInputConfigurationView(3, 2, profiles, outcome)
     override suspend fun state(deviceId: String): DeviceView { record("state", deviceId); return DeviceView(deviceId, ConnectionState.CONNECTED,
         MonitoringState(MonitoringLifecycle.RUNNING, session, measurement, activeProducerCount = 1, error = "secret jdbc stack trace"),
         listOf(CameraView("A", CameraState.AVAILABLE, true, true)), ConfigurationRevisions(3, 2), 14) }
@@ -52,6 +62,13 @@ internal class FakeBackend : BackendApplication {
     override suspend fun save(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView { record("save", deviceId, commandId, configuration); return view(configuration) }
     override suspend fun apply(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): ConfigurationView { record("apply", deviceId, commandId, revision, expectedSavedRevision); return view() }
     override suspend fun saveAndApply(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView { record("saveAndApply", deviceId, commandId, configuration); return view(configuration) }
+    override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView { record("udpInputConfiguration", deviceId); return udpView() }
+    override suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView {
+        record("saveUdpInput", deviceId, commandId, profiles); return udpView(profiles = profiles)
+    }
+    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView {
+        record("applyUdpInput", deviceId, commandId, revision, expectedSavedRevision); return udpView(UdpApplyOutcome.APPLIED)
+    }
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView { record("createDraft", deviceId, commandId, cameraId, configuration); return DraftView("draft1", cameraId, 1, configuration) }
     override suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView { record("updateDraft", deviceId, draftId, commandId, expectedRevision, configuration); return DraftView(draftId, "A", 2, configuration) }
     override suspend fun deleteDraft(deviceId: String, draftId: String, commandId: String) { record("deleteDraft", deviceId, draftId, commandId) }

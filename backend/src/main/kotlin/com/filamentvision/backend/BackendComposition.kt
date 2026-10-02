@@ -4,6 +4,8 @@ import com.filamentvision.backend.application.*
 import com.filamentvision.backend.persistence.sqlite.*
 import com.filamentvision.backend.preview.PngPreviewEncoder
 import com.filamentvision.backend.simulator.*
+import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.runtime.*
 import com.filamentvision.backend.snapshot.FileSnapshotObjectStore
 import com.filamentvision.core.alarm.AlarmTransition
 import com.filamentvision.core.config.*
@@ -34,6 +36,8 @@ internal data class SessionProvenance(val sessionId: String, val appliedRevision
 class BackendComposition private constructor(
     private val database: SqliteDatabase,
     internal val repository: SqliteRepositories,
+    internal val udpProfileRepository: SqliteUdpInputProfileRepository,
+    internal val udpInputRouter: UdpInputRouter,
     internal val store: FileSnapshotObjectStore,
     private val scope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
@@ -186,6 +190,12 @@ class BackendComposition private constructor(
                 edgeSensitivity = 30, minimumPixelWidth = 1, maximumPixelWidth = 46, mmPerPixel = .05))
             return MonitoringConfiguration(cameraA = vision, cameraB = vision)
         }
+        fun defaultUdpInputProfiles() = UdpInputProfileSet(
+            UdpInputProfile(UdpCameraId.A, true, null, 5101, TransportMode.STRUCTURED_CHUNKED,
+                PayloadProfile.Gray8(48, 8), ApplicationFramingProfile(), TransportLimits()),
+            UdpInputProfile(UdpCameraId.B, true, null, 5102, TransportMode.STRUCTURED_CHUNKED,
+                PayloadProfile.Gray8(48, 8), ApplicationFramingProfile(), TransportLimits()),
+        )
         suspend fun open(database: Path, snapshotRoot: Path, dispatcher: CoroutineDispatcher = Dispatchers.Default,
             ioDispatcher: CoroutineDispatcher = Dispatchers.IO, epochMillis: () -> Long = System::currentTimeMillis,
             monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 }): BackendComposition = withContext(ioDispatcher) {
@@ -196,7 +206,13 @@ class BackendComposition private constructor(
             try {
                 val r = SqliteRepositories(db)
                 val initial = r.revisions().appliedRevision?.let(r::configuration) ?: r.saveConfiguration(defaultConfiguration()).also { r.markApplied(it.revision, it.revision) }
-                BackendComposition(db, r, FileSnapshotObjectStore(snapshotRoot), scope, ioDispatcher, epochMillis, monotonicMillis, initial, r.revisions(), dispatcher)
+                val udpRepository = SqliteUdpInputProfileRepository(db, defaultUdpInputProfiles())
+                val udpAppliedRevision = udpRepository.appliedRevision()
+                val udpApplied = checkNotNull(udpRepository.get(udpAppliedRevision))
+                val udpRouter = UdpInputRouter(udpAppliedRevision, udpApplied.profiles,
+                    UdpCameraRuntimeSwapper { _, _, _, _ -> })
+                BackendComposition(db, r, udpRepository, udpRouter, FileSnapshotObjectStore(snapshotRoot), scope,
+                    ioDispatcher, epochMillis, monotonicMillis, initial, r.revisions(), dispatcher)
             } catch (error: Throwable) { scope.cancel(); db.close(); throw error }
         }
     }
