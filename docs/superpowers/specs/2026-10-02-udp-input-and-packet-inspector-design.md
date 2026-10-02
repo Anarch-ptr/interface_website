@@ -57,7 +57,7 @@ PayloadDecoder ------------------> PacketInspectorTap (decode result)
 UdpInputProfile
   cameraId: A | B
   enabled: Boolean
-  sourceIp: optional IPv4/IPv6 literal
+  sourceIp: optional IPv4 literal
   listenPort: 1..65535
   transportMode: SINGLE_DATAGRAM | STRUCTURED_CHUNKED
   payload: PayloadProfile
@@ -65,7 +65,9 @@ UdpInputProfile
   transportLimits: TransportLimits
 ```
 
-两个 enabled profile 的 listen port 第一版必须不同；避免两个 receiver 争用同一 socket。`sourceIp` 为空表示接受任意来源，否则在 `TransportDatagramParser` 前严格过滤。来源不匹配的 Datagram 绝不能进入 transport parsing、reassembly、decoder 或 measurement。Backend 默认绑定 `0.0.0.0`，不把 bind address 暴露为本阶段设置。
+两个 enabled profile 的 listen port 第一版必须不同；避免两个 receiver 争用同一 socket。v1 receiver 明确只使用 IPv4：socket 使用 IPv4 protocol family，Backend 显式绑定 `0.0.0.0`，`sourceIp` 只接受规范化的 IPv4 literal 或为空。IPv6 literal 在 profile validation 阶段拒绝；实现不得依赖 JVM/OS 对 IPv4 socket 的隐式 IPv6/dual-stack 行为。IPv6 与 dual-stack 是未来独立 transport 扩展，不在本阶段实现。
+
+`sourceIp` 为空表示接受任意 IPv4 来源，否则在 `TransportDatagramParser` 前严格过滤。来源不匹配的 Datagram 绝不能进入 transport parsing、reassembly、decoder 或 measurement。bind address 不暴露为本阶段设置。
 
 配置分为 saved revision 与 applied revision。保存写入 Repository Adapter；应用将指定 revision 原子地编译为 immutable runtime profile。无效 profile 永远不能到达 receiver。
 
@@ -93,7 +95,7 @@ UdpInputProfile
 | 28 | 2 | payloadLength | 当前 Datagram 中 Structured Transport Header 之后、进入 DATAGRAM-scope Application Framing 之前的 Transport Payload bytes |
 | 30 | 4 | framePayloadBytes | 所有 chunk 完成 DATAGRAM-scope Application Header/Footer validation 及可选 strip 后，实际进入 FrameReassembler 的 bytes 总数 |
 
-实际 Datagram 长度必须严格等于 `headerLength + payloadLength`。Header cameraId 必须匹配 receiver profile。`framePayloadBytes`、`chunkCount`、`payloadLength` 必须先通过配置和 hard limit 校验，之后才允许建立 reassembly state。
+实际 Datagram 长度必须严格等于 `headerLength + payloadLength`。Header cameraId 必须匹配 receiver profile。`payloadLength <= maxChunkPayloadBytes` 必须在任何 DATAGRAM-scope Application Header/Footer parsing、chunk copy 或 reassembly allocation 前验证；`framePayloadBytes`、`chunkCount` 和其他 transport fields 也必须先通过配置与 hard limit，之后才允许建立 reassembly state。
 
 `payloadLength` 的语义永远停留在 transport 层，不因 Application Header/Footer 是否 strip 而改变。`framePayloadBytes` 则永远描述 DATAGRAM-scope framing 处理之后的 reassembly input：`strip=true` 时被 strip 的 bytes 不计入，`strip=false` 时相应 Header/Footer 自然保留并计入。Sender 必须按 applied profile 的 DATAGRAM-scope framing 规则填写 `framePayloadBytes`。
 
@@ -107,12 +109,24 @@ Frame key 为 `(cameraId, source endpoint, frameId)`。chunk 可以乱序到达�
 - `maxFrameBytes`: 默认 8 MiB，hard max 32 MiB。
 - `frameTimeoutMs`: 默认 1000，范围 100..10000。
 - `maxChunkCount`: 默认 4096，hard max 8192。
-- `maxChunkPayloadBytes`: 默认 1400，范围 1..60000。
+- `maxChunkPayloadBytes`: 默认 1400，范围 1..60000；永远限制 Structured Header 中的 pre-DATAGRAM-framing `payloadLength`。
 - `maxBufferedBytesPerCamera`: hard max 64 MiB；实际预算取配置计算值与 hard max 的较小值。
 
 实现不得依据外部声明直接分配 `framePayloadBytes` 大小的连续 buffer。先保存通过上限校验的 bounded chunks，完成时再进行一次受限合并。达到 in-flight 或 byte budget 时，按 oldest-incomplete 策略丢弃并记录原因。超时 frame 释放全部 chunk；使用 bounded tombstone 记录近期超时 frameId，以识别 late chunk，不建立无限集合。
 
-### 5.1 Timestamp provenance 与 pairing
+`maxChunkPayloadBytes` 不因 DATAGRAM-scope strip 而重新解释。Application Header/Footer 被 strip 后，实际进入 reassembler 的 chunk 可以更小；transport validation 仍只比较原始 Structured Header `payloadLength`。Structured mode 的最大合法 raw Datagram bytes 精确为 `34 + configured maxChunkPayloadBytes`。
+
+### 5.1 UDP receive capacity 与 truncation
+
+Application-level receive buffer 必须按 applied transport profile 设置，并在 parser 前保留 oversized sentinel 空间：
+
+- `STRUCTURED_CHUNKED`: accepted limit 为 checked `34 + maxChunkPayloadBytes`；当该值小于 UDP IPv4 payload hard maximum 65507 时，receive buffer 分配 `acceptedLimit + 1` bytes。
+- `SINGLE_DATAGRAM`: reassembly input 上限为 `maxFrameBytes`。raw Datagram accepted limit 为 checked `maxFrameBytes + enabled DATAGRAM-scope stripped header/footer bytes`，但不超过 65507；`strip=false` 的 Header/Footer 已包含在 reassembly input 中，不能重复加算。若 accepted limit 小于 65507，同样分配 `acceptedLimit + 1` sentinel byte。
+- accepted limit 已等于 65507 时，receive buffer 为 65507；IPv4 UDP 不可能合法传送更大的 payload。
+
+如果 receive 结果占满 sentinel capacity，说明原 Datagram 至少超过 configured accepted limit。该 Datagram 必须在任何 parser/framing/reassembly 前以 `DATAGRAM_TOO_LARGE_OR_TRUNCATED` 丢弃并增加独立 diagnostics；不得把被截断 bytes 继续交给普通 parser，因而不会误报为 magic、header、footer 或 payload-size 错误。实现还必须显式配置合理的 OS socket receive queue capacity，但 queue capacity 与单 Datagram application buffer 是两个不同的边界，不能用前者替代 sentinel 检测。
+
+### 5.2 Timestamp provenance 与 pairing
 
 每个 Datagram 在 Backend socket 接收边界只采集一次 `receivedAtMonotonicNanos`，使用同一 Backend process 的 monotonic clock。`SINGLE_DATAGRAM` 的 `CameraInput` 使用该接收时刻。`STRUCTURED_CHUNKED` 的 frame 保存第一个被接受 chunk 的 `receivedAtMonotonicNanos`，同时保存 `completedAtMonotonicNanos` 供 latency/diagnostics 使用。
 
@@ -220,6 +234,7 @@ Apply 可在 monitoring 期间执行；发生 receiver restart 时该 Camera 短
 - duplicate/out-of-order/missing/late chunks
 - reassembly timeouts
 - invalid transport headers
+- `oversizedOrTruncatedDatagrams`
 - `sourceFilteredDatagrams`
 - invalid application headers/footers
 - invalid payload size
@@ -271,7 +286,7 @@ GET 由前端以 2 Hz 轮询；响应包含 snapshot sequence，未变化时可�
 
 ## 11. Settings UI
 
-Camera A/B 使用独立卡片和 draft。普通区域显示：Enabled、Source IP、Listen Port、Transport Mode、Payload Format、Width、Height，以及格式相关必要字段。
+Camera A/B 使用独立卡片和 draft。普通区域显示：Enabled、Source IPv4、Listen Port、Transport Mode、Payload Format、Width、Height，以及格式相关必要字段。Source IPv4 输入明确拒绝 IPv6，并提示 v1 仅支持 IPv4。
 
 `Chunked UDP` 展开 Advanced Transport：protocol version（只读 v1）、recommended chunk payload、frame timeout、max frame bytes、max in-flight frames、max chunk count。`Advanced UDP Framing` 显示 Application Header/Footer，并明确标记它们不是 Transport Header。
 
@@ -293,6 +308,7 @@ Core 只接收统一的 image frame 或 direct diameter evidence。Transport/JPE
 
 ```text
 INVALID_TRANSPORT_HEADER
+DATAGRAM_TOO_LARGE_OR_TRUNCATED
 UNSUPPORTED_PROTOCOL_VERSION
 CAMERA_ID_MISMATCH
 SOURCE_IP_MISMATCH
@@ -324,6 +340,9 @@ UNKNOWN
 实现顺序严格为：测试 RED、最小 GREEN、相关回归、diff review。至少覆盖用户列出的 decoder/framing/Inspector 案例，并增加：
 
 - Structured Header Big Endian round-trip、错误 magic/version/camera/length。
+- v1 profile validation 拒绝 IPv6 literal；IPv4 source filtering 接受匹配来源并拒绝不匹配来源。
+- Structured `payloadLength > maxChunkPayloadBytes` 在 DATAGRAM-scope framing、chunk copy 和 reassembly allocation 前拒绝。
+- 两种 transport mode 的最大合法 Datagram 均由足够大的 receive buffer 完整接收；超过 configured limit 或发生 sentinel truncation 时报告 `DATAGRAM_TOO_LARGE_OR_TRUNCATED`，不进入普通 parser。
 - `payloadLength` 固定表示 pre-DATAGRAM-framing Transport Payload；`framePayloadBytes` 在 DATAGRAM `strip=true`/`strip=false` 及 Header/Footer 混合 scope 下精确匹配 reassembly input。
 - chunk 乱序、重复、冲突、缺失、交错 frame、late chunk、timeout。
 - max in-flight、max bytes、max chunks、oversized declaration 不分配。
