@@ -47,7 +47,7 @@ PayloadDecoder ------------------> PacketInspectorTap (decode result)
 
 任何 Inspector 捕获、格式化或 API 错误都被隔离，不回传到正常路径。
 
-`CameraInput` 是纯 Kotlin Core 边界，不包含 UDP、JPEG、Ktor 或 SQLite 类型。`ImageFrameInput` 继续进入现有 `VisionProcessor`；`DirectDiameterInput` 转换为有效的 `CameraMeasurement`（`pixelWidth=0`、`confidence=1.0`），随后进入同一 A/B pairing 与 fusion 路径。现有 image source 通过兼容 adapter 接入，因此 characterization/golden tests 继续作为行为基线。`MonitoringRuntime` 仍然只拥有一个 producer reservation；Camera A/B socket 是这一个 source lifecycle 的子资源，不分别计作 monitoring producer。
+`CameraInput` 是纯 Kotlin Core 边界，不包含 UDP、JPEG、Ktor 或 SQLite 类型。`ImageFrameInput` 继续进入现有 `VisionProcessor`；`DirectDiameterInput` 保持明确的 direct evidence 类型，直到 measurement/fusion adapter 边界才映射为带 `source=DIRECT_DIAMETER`、`pixelWidth=null` 的 measurement。现有 image source 通过兼容 adapter 接入，因此 characterization/golden tests 继续作为行为基线。`MonitoringRuntime` 仍然只拥有一个 producer reservation；Camera A/B socket 是这一个 source lifecycle 的子资源，不分别计作 monitoring producer。
 
 ## 3. `UdpInputProfile`
 
@@ -65,7 +65,7 @@ UdpInputProfile
   transportLimits: TransportLimits
 ```
 
-两个 enabled profile 的 listen port 第一版必须不同；避免两个 receiver 争用同一 socket。`sourceIp` 为空表示接受任意来源，否则在进入 parser 前严格过滤。Backend 默认绑定 `0.0.0.0`，不把 bind address 暴露为本阶段设置。
+两个 enabled profile 的 listen port 第一版必须不同；避免两个 receiver 争用同一 socket。`sourceIp` 为空表示接受任意来源，否则在 `TransportDatagramParser` 前严格过滤。来源不匹配的 Datagram 绝不能进入 transport parsing、reassembly、decoder 或 measurement。Backend 默认绑定 `0.0.0.0`，不把 bind address 暴露为本阶段设置。
 
 配置分为 saved revision 与 applied revision。保存写入 Repository Adapter；应用将指定 revision 原子地编译为 immutable runtime profile。无效 profile 永远不能到达 receiver。
 
@@ -90,12 +90,14 @@ UdpInputProfile
 | 16 | 2 | chunkIndex | zero-based，必须 `< chunkCount` |
 | 18 | 2 | chunkCount | `1..configuredMaxChunkCount` |
 | 20 | 8 | timestamp | Unix epoch microseconds |
-| 28 | 2 | payloadLength | 当前 chunk payload bytes |
-| 30 | 4 | framePayloadBytes | 重组后的 application-framed bytes |
+| 28 | 2 | payloadLength | 当前 Datagram 中 Structured Transport Header 之后、进入 DATAGRAM-scope Application Framing 之前的 Transport Payload bytes |
+| 30 | 4 | framePayloadBytes | 所有 chunk 完成 DATAGRAM-scope Application Header/Footer validation 及可选 strip 后，实际进入 FrameReassembler 的 bytes 总数 |
 
 实际 Datagram 长度必须严格等于 `headerLength + payloadLength`。Header cameraId 必须匹配 receiver profile。`framePayloadBytes`、`chunkCount`、`payloadLength` 必须先通过配置和 hard limit 校验，之后才允许建立 reassembly state。
 
-Frame key 为 `(cameraId, source endpoint, frameId)`。chunk 可以乱序到达。重复且内容相同的 chunk 被忽略并计数；相同 index 但内容不同会丢弃整个 frame。完成时，唯一 chunk 的 payload 按 `chunkIndex` 拼接，长度必须等于 `framePayloadBytes`。
+`payloadLength` 的语义永远停留在 transport 层，不因 Application Header/Footer 是否 strip 而改变。`framePayloadBytes` 则永远描述 DATAGRAM-scope framing 处理之后的 reassembly input：`strip=true` 时被 strip 的 bytes 不计入，`strip=false` 时相应 Header/Footer 自然保留并计入。Sender 必须按 applied profile 的 DATAGRAM-scope framing 规则填写 `framePayloadBytes`。
+
+Frame key 为 `(cameraId, source endpoint, frameId)`。chunk 可以乱序到达。重复且内容相同的 chunk 被忽略并计数；相同 index 但内容不同会丢弃整个 frame。完成时，只拼接每个 chunk 经 DATAGRAM-scope validation/strip 后的 bytes，并以其精确总和校验 `framePayloadBytes`。因此最终长度校验不使用原始 Transport Payload 长度，也不包含 Structured Transport Header。
 
 ## 5. Reassembly 安全边界
 
@@ -109,6 +111,16 @@ Frame key 为 `(cameraId, source endpoint, frameId)`。chunk 可以乱序到达�
 - `maxBufferedBytesPerCamera`: hard max 64 MiB；实际预算取配置计算值与 hard max 的较小值。
 
 实现不得依据外部声明直接分配 `framePayloadBytes` 大小的连续 buffer。先保存通过上限校验的 bounded chunks，完成时再进行一次受限合并。达到 in-flight 或 byte budget 时，按 oldest-incomplete 策略丢弃并记录原因。超时 frame 释放全部 chunk；使用 bounded tombstone 记录近期超时 frameId，以识别 late chunk，不建立无限集合。
+
+### 5.1 Timestamp provenance 与 pairing
+
+每个 Datagram 在 Backend socket 接收边界只采集一次 `receivedAtMonotonicNanos`，使用同一 Backend process 的 monotonic clock。`SINGLE_DATAGRAM` 的 `CameraInput` 使用该接收时刻。`STRUCTURED_CHUNKED` 的 frame 保存第一个被接受 chunk 的 `receivedAtMonotonicNanos`，同时保存 `completedAtMonotonicNanos` 供 latency/diagnostics 使用。
+
+无论 decoder 输出 `ImageFrameInput` 还是 `DirectDiameterInput`，结果都必须携带上述 Backend monotonic provenance。SINGLE_DATAGRAM 的 `sourceTimestampMicros=null`；STRUCTURED_CHUNKED 同时携带独立的 `sourceTimestampMicros` metadata。
+
+Structured Header 的 `timestamp` 在 domain metadata 中命名为 `sourceTimestampMicros`。同一 frame 的所有 chunk 必须携带一致值，否则作为 transport header conflict 丢弃该 frame。第一版不假设 Raspberry Pi/Camera A/Camera B 的 sender clock 已同步，因此 A/B pairing **只使用 Backend `receivedAtMonotonicNanos`**；`sourceTimestampMicros` 不参与 pairing、timeout 或 session ordering，只用于 Inspector、日志和未来 clock-synchronization 扩展。若未来改用 source timestamp，必须先增加明确的 clock offset/uncertainty contract 和跨 sender 同步验证。
+
+显示用途另存 `receivedAtEpochMillis`，但 wall clock 不参与 pairing 或 timeout。所有 timeout 使用 monotonic clock，防止系统时间调整破坏 reassembly。
 
 ## 6. Application Header/Footer
 
@@ -134,26 +146,41 @@ Enabled 时必须匹配；不匹配的 Datagram/Frame 被丢弃，同时 Inspect
 
 Decoder 不知道 transport mode，只接收已经完成 transport、reassembly 和 application framing 的 payload。
 
+### 7.1 统一 decoded image allocation safety
+
+所有图像 Decoder 共享同一组 Backend hard limits，不能只依赖 JPEG compressed `maxFrameBytes`：
+
+```text
+hardMaxWidth = 8192
+hardMaxHeight = 8192
+hardMaxDecodedPixels = 16,777,216
+hardMaxDecodedBytes = 67,108,864 (64 MiB)
+```
+
+`width * height`、`width * height * channels`、`ceil(bits / 8)`、内部 ARGB buffer bytes 以及 stride/row offset 运算必须使用 checked arithmetic。任何 overflow、超出 `Int` 可索引范围或超过上述 hard limit 都在分配前拒绝。Payload wire bytes 与 decoded bytes 分别验证；例如 RGB888 wire payload 是 3 bytes/pixel，但转换后的内部 ARGB buffer 按 4 bytes/pixel 计算 decoded allocation。
+
+JPEG compressed `maxFrameBytes` 与 decoded image limits 是两个独立边界。`JpegDecoder` 必须先通过 metadata reader 获取 dimensions，在申请完整 raster/pixel buffer 之前验证 width、height、decoded pixels、decoded row stride 与 decoded bytes。无法安全读取 metadata、dimensions 非法或 metadata 与实际 decode 不一致时拒绝。Inspector 复用这次 metadata，不触发第二次完整 decode。
+
 ### `GRAY8`
 
-需要 `width`、`height`。预期长度严格为 `width * height`，每像素 1 byte，并转换为现有 image frame model。
+需要 `width`、`height`。以 checked arithmetic 计算预期长度 `width * height`，严格匹配 payload；每像素 1 byte。转换为现有 image frame model 前还必须验证统一 decoded allocation limits。
 
 ### `BINARY`
 
 需要 `width`、`height`、`binaryPacking`：
 
-- `BYTE_PER_PIXEL`: 严格 `width * height` bytes；0 为黑，非 0 为白。
-- `BIT_PACKED`: 严格 `ceil(width * height / 8)` bytes；每 byte 从 MSB 到 LSB，最后 byte 的 padding bits 忽略。
+- `BYTE_PER_PIXEL`: checked `width * height` bytes；0 为黑，非 0 为白。
+- `BIT_PACKED`: checked `ceil(width * height / 8)` bytes；每 byte 从 MSB 到 LSB，最后 byte 的 padding bits 忽略。
 
-输出为 0/255 的 grayscale image frame。
+输出为 0/255 的 grayscale image frame；即使 wire payload 是 bit-packed，decoded pixel allocation 仍按实际输出 buffer 验证统一 hard limits。
 
 ### `RGB888`
 
-需要 `width`、`height`、`channelOrder=RGB|BGR`。长度严格为 `width * height * 3`，转换为内部统一 image frame。
+需要 `width`、`height`、`channelOrder=RGB|BGR`。以 checked arithmetic 计算并严格匹配 `width * height * 3`，随后在分配内部统一 image frame 前按 4 bytes/pixel 验证 decoded allocation limits。
 
 ### `JPEG`
 
-需要 `maxFrameBytes`，可选 `expectedWidth/expectedHeight`。先进行 bounded JPEG decode，再从图像读取实际尺寸；可选尺寸不匹配时拒绝。Inspector 复用 decoder 得到的 metadata，不重复完整 decode。
+需要 compressed `maxFrameBytes`，可选 `expectedWidth/expectedHeight`。先读取 JPEG metadata/dimensions 并执行 7.1 的 decoded limits，再进行 bounded decode；可选尺寸不匹配时拒绝。禁止先分配完整 decoded pixel buffer、再检查 dimensions。
 
 ### `DIAMETER`
 
@@ -165,7 +192,11 @@ offset: finite number
 unit: MM | MICROMETER | INCH
 ```
 
-Binary encoding 要求精确 byte length；ASCII 限制为 128 bytes，trim 后必须是有限十进制/科学计数数值。先计算 `decoded * scale + offset`，再按 unit 归一化成 pipeline 使用的 millimetres。直接 diameter sample 转为对应 Camera 的 measurement evidence，默认 confidence 为 `1.0`；A/B 仍由现有 pairing/fusion 处理，原始 A/B 值继续保留。
+Binary encoding 要求精确 byte length；ASCII 限制为 128 bytes，trim 后必须是有限十进制/科学计数数值。先计算 `decoded * scale + offset`，再按 unit 归一化成 pipeline 使用的 millimetres。
+
+`DirectDiameterInput` 在 fusion adapter 之前始终保持明确的 `DirectDiameterEvidence`，包含 cameraId、normalized diameter、raw value/encoding/unit、sequence、`receivedAtMonotonicNanos` 和可选 future confidence。它不是 image-derived measurement。为保持这一语义，`CameraMeasurement` 增加 `source=VISION|DIRECT_DIAMETER`，并把 `pixelWidth` 改为 nullable；Direct Diameter 映射时 `pixelWidth=null`，不得写入虚构的 0 pixel width。
+
+第一版 Direct Diameter payload 不携带设备置信度。Profile 提供独立的 `directDiameterFusionConfidence`（默认 `1.0`，范围 `(0,1]`），它只表示 Backend fusion weighting/default confidence semantics，不能在 UI、API 或 diagnostics 中描述为设备自身测量置信度。Evidence 保留 nullable device confidence 扩展点，未来可由 payload 或 profile policy 显式选择。
 
 ## 8. Runtime Apply
 
@@ -189,6 +220,7 @@ Apply 可在 monitoring 期间执行；发生 receiver restart 时该 Camera 短
 - duplicate/out-of-order/missing/late chunks
 - reassembly timeouts
 - invalid transport headers
+- `sourceFilteredDatagrams`
 - invalid application headers/footers
 - invalid payload size
 - oversized frames
@@ -211,6 +243,8 @@ Camera A/B 各有独立 `PacketInspectorTap`。默认 disabled。Settings 打开
 - 最新完成 Frame 的 application framing 和 decode metadata。
 
 不保存完整 Datagram、完整 JPEG/RGB frame 或 packet history。接收线程只做 bounded byte copy 和 immutable metadata replacement；Hex/ASCII formatting 在 REST 请求线程按需生成。
+
+`sourceIp` mismatch 在正常 pipeline 中于 transport parser 前结束，并增加 `sourceFilteredDatagrams`。当对应 Camera 存在有效 Inspector lease 时，tap 可以在丢弃前复制 bounded raw preview 和轻量 endpoint metadata，状态标记为 `SOURCE_IP_MISMATCH`；不得继续 transport parse、reassembly 或 decode。Inspector disabled 时只增加 counter，不复制 raw bytes、不生成 Hex 字符串，也不构造重型 parsed/debug 对象。
 
 ### 10.2 Datagram-level 与 Frame-level
 
@@ -241,7 +275,7 @@ Camera A/B 使用独立卡片和 draft。普通区域显示：Enabled、Source I
 
 `Chunked UDP` 展开 Advanced Transport：protocol version（只读 v1）、recommended chunk payload、frame timeout、max frame bytes、max in-flight frames、max chunk count。`Advanced UDP Framing` 显示 Application Header/Footer，并明确标记它们不是 Transport Header。
 
-字段按 payload format 条件显示：Binary packing、RGB channel order、JPEG max/expected dimensions、Diameter encoding/byte order/scale/offset/unit。UI 给出 transport recommendation，但不强制 format 与 transport mode绑定。
+字段按 payload format 条件显示：Binary packing、RGB channel order、JPEG max/expected dimensions、Diameter encoding/byte order/scale/offset/unit，以及标记为 Backend fusion default、而非设备置信度的 `directDiameterFusionConfidence`。UI 给出 transport recommendation，但不强制 format 与 transport mode绑定。
 
 Save 持久化完整 A/B draft；Apply 调用 Backend 并显示 saved/applied revision、receiver restart 或 parser swap 结果。所有校验由前端提供即时反馈，同时 Backend 重新执行同等或更严格的 authoritative validation。
 
@@ -261,6 +295,7 @@ Core 只接收统一的 image frame 或 direct diameter evidence。Transport/JPE
 INVALID_TRANSPORT_HEADER
 UNSUPPORTED_PROTOCOL_VERSION
 CAMERA_ID_MISMATCH
+SOURCE_IP_MISMATCH
 INVALID_CHUNK_INDEX
 INVALID_CHUNK_COUNT
 INVALID_CHUNK_LENGTH
@@ -289,12 +324,18 @@ UNKNOWN
 实现顺序严格为：测试 RED、最小 GREEN、相关回归、diff review。至少覆盖用户列出的 decoder/framing/Inspector 案例，并增加：
 
 - Structured Header Big Endian round-trip、错误 magic/version/camera/length。
+- `payloadLength` 固定表示 pre-DATAGRAM-framing Transport Payload；`framePayloadBytes` 在 DATAGRAM `strip=true`/`strip=false` 及 Header/Footer 混合 scope 下精确匹配 reassembly input。
 - chunk 乱序、重复、冲突、缺失、交错 frame、late chunk、timeout。
 - max in-flight、max bytes、max chunks、oversized declaration 不分配。
 - DATAGRAM 与 FRAME scope 在两种 transport mode 下的明确边界。
+- GRAY8/BINARY/RGB888 dimensions 与 payload 计算使用 checked arithmetic；乘法/ceil overflow 和 decoded allocation 超限在分配前拒绝。
+- JPEG decompression bomb/oversized metadata dimensions、compressed limit 与 decoded pixels/bytes limits 分别生效，metadata validation 发生在完整 decode allocation 前。
+- SINGLE_DATAGRAM 保存 socket `receivedAtMonotonicNanos`；STRUCTURED_CHUNKED 保存 first-chunk monotonic provenance 和独立 `sourceTimestampMicros`，pairing 只使用 Backend monotonic time。
+- Direct Diameter 保留 `DirectDiameterEvidence`/`source=DIRECT_DIAMETER`、nullable pixel width，且 fusion default confidence 不被当成设备置信度。
 - Apply parser-only 原子交换、receiver restart、bind rollback、重复 Apply 不重复 job。
 - Camera A/B socket、reassembly、statistics、Inspector 完全隔离。
 - Inspector disabled 时不生成 Hex 字符串且正常 pipeline 行为等价。
+- `sourceIp` mismatch 永不进入 parser/reassembly/decoder/measurement；Inspector lease 启用时仍可观察 bounded raw preview 和 `SOURCE_IP_MISMATCH`，关闭时只增加 counter。
 - REST preview 上限、lease expiry、Freeze/Resume 前端行为。
 
 最终用真实 UDP sender 集成测试：合法 GRAY8 structured chunks（包含乱序）、错误 Application Header、DIAMETER single datagram；验证 Backend measurement/diagnostics 与 Settings Raw/Parsed Inspector。持续验证 reliable measurement/alarm/session event 不因 Inspector 或 preview 拥塞丢失。
