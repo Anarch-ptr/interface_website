@@ -2,7 +2,14 @@ import {
   MeasurementStatus,
   type DiameterReading,
   type MonitoringConfiguration,
+  type BackendMeasurement,
 } from './monitoring'
+
+export function toDiameterReading(measurement: BackendMeasurement, configuration: MonitoringConfiguration): DiameterReading | null {
+  if (measurement.diameterMm === null) return null
+  return createDiameterReading({ diameterMm: measurement.diameterMm, confidence: measurement.confidence,
+    status: measurement.status, timestamp: measurement.timestamp, configuration })
+}
 
 export function classifyDiameter(
   diameterMm: number,
@@ -31,39 +38,30 @@ function exceedsThreshold(value: number, threshold: number): boolean {
 }
 
 interface CreateDiameterReadingInput {
-  fusedDiameterMm: number
+  diameterMm: number
+  confidence: number | null
+  status?: string
   configuration: MonitoringConfiguration
   timestamp: number
-  diameterAMm?: number
-  diameterBMm?: number
-  cameraAConfidence?: number
-  cameraBConfidence?: number
 }
 
 export function createDiameterReading({
-  fusedDiameterMm,
+  diameterMm,
+  confidence,
+  status,
   configuration,
   timestamp,
-  diameterAMm = fusedDiameterMm,
-  diameterBMm = fusedDiameterMm,
-  cameraAConfidence = 1,
-  cameraBConfidence = 1,
 }: CreateDiameterReadingInput): DiameterReading {
-  const deviationMm = fusedDiameterMm - configuration.targetDiameterMm
+  const deviationMm = diameterMm - configuration.targetDiameterMm
   const absoluteDeviationMm = Math.abs(deviationMm)
 
   return {
     timestamp,
-    fusedDiameterMm,
-    diameterAMm,
-    diameterBMm,
-    cameraAConfidence,
-    cameraBConfidence,
-    confidence: (cameraAConfidence + cameraBConfidence) / 2,
-    shapeDifferenceMm: Math.abs(diameterAMm - diameterBMm),
+    diameterMm,
+    confidence,
     deviationMm,
     absoluteDeviationMm,
     deviationPercent: (deviationMm / configuration.targetDiameterMm) * 100,
-    status: classifyDiameter(fusedDiameterMm, configuration),
+    status: status ?? classifyDiameter(diameterMm, configuration),
   }
 }

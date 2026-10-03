@@ -77,7 +77,16 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
 .state-indicator { width: 9px; height: 9px; border-radius: 50%; background: var(--warning); box-shadow: 0 0 0 4px var(--warning-soft); }
 .state-indicator.healthy { background: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
 
-.dashboard-grid { display: grid; grid-template-columns: minmax(330px, 0.74fr) minmax(500px, 1.45fr); gap: 18px; align-items: stretch; }
+.dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, 0.9fr); gap: 18px; align-items: stretch; }
+.preview-panel { min-width: 0; display: flex; flex-direction: column; }
+.camera-preview { margin: 20px 22px; min-width: 0; }
+.camera-preview img { display: block; width: 100%; height: auto; max-height: 440px; object-fit: contain; background: #080d12; border-radius: 9px; }
+.camera-preview figcaption, .measurement-context { display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; color: var(--muted); font-size: .72rem; }
+.preview-waiting { min-height: 360px; display: grid; place-items: center; color: var(--muted); }
+.udp-status strong { line-height: 1.5; letter-spacing: 0; }
+.udp-status small { color: var(--muted); }
+.backend-error, .session-context { margin: 12px 22px; color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
+.backend-error { color: var(--critical); }
 .panel { border: 1px solid var(--border); border-radius: 15px; background: linear-gradient(145deg, rgba(22, 35, 45, 0.96), rgba(16, 26, 34, 0.97)); box-shadow: var(--shadow); }
 .panel-heading { padding: 19px 22px 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .panel-heading h3 { margin-top: 4px; }
@@ -221,7 +230,7 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
   .navigation-rail nav { width: 100%; }
   .nav-item { justify-content: center; padding-inline: 8px; }
   .rail-foot { padding: 12px; }
-  .dashboard-grid { grid-template-columns: minmax(310px, 0.75fr) minmax(430px, 1.2fr); }
+  .dashboard-grid { grid-template-columns: minmax(0, 1.2fr) minmax(310px, 0.9fr); }
   .metric-list { grid-template-columns: repeat(2, 1fr); }
   .alarm-table-head, .alarm-row { grid-template-columns: 0.75fr 1.3fr 0.9fr 0.9fr; }
   .alarm-table-head span:nth-child(3), .alarm-row > :nth-child(3), .alarm-table-head span:nth-child(6), .alarm-row > :nth-child(6) { display: none; }

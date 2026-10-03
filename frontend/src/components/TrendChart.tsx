@@ -12,7 +12,7 @@ export function TrendChart({ readings, configuration }: { readings: readonly Dia
   const plotHeight = VIEW_HEIGHT - PADDING.top - PADDING.bottom
   const xFor = (index: number) => PADDING.left + (readings.length <= 1 ? plotWidth : (index / (readings.length - 1)) * plotWidth)
   const yFor = (diameter: number) => PADDING.top + ((yMax - diameter) / (yMax - yMin)) * plotHeight
-  const points = readings.map((reading, index) => `${xFor(index)},${yFor(reading.fusedDiameterMm)}`).join(' ')
+  const points = readings.map((reading, index) => `${xFor(index)},${yFor(reading.diameterMm)}`).join(' ')
   const latest = readings.at(-1)
 
   return (
@@ -25,9 +25,9 @@ export function TrendChart({ readings, configuration }: { readings: readonly Dia
         <ThresholdLine y={yFor(configuration.targetDiameterMm - configuration.warningDeviationMm)} label="− warning" className="warning-line" />
         <ThresholdLine y={yFor(configuration.targetDiameterMm + configuration.outOfToleranceDeviationMm)} label="+ limit" className="limit-line" />
         <ThresholdLine y={yFor(configuration.targetDiameterMm - configuration.outOfToleranceDeviationMm)} label="− limit" className="limit-line" />
-        {latest ? <><polyline className="trend-line-glow" points={points} /><polyline className="trend-line" points={points} /><circle className={`latest-point ${latest.status.toLowerCase()}`} cx={xFor(readings.length - 1)} cy={yFor(latest.fusedDiameterMm)} r="4.5" /></> : <text className="chart-empty" x="50%" y="50%" textAnchor="middle">Waiting for measurement data…</text>}
+        {latest ? <><polyline className="trend-line-glow" points={points} /><polyline className="trend-line" points={points} /><circle className={`latest-point ${latest.status.toLowerCase()}`} cx={xFor(readings.length - 1)} cy={yFor(latest.diameterMm)} r="4.5" /></> : <text className="chart-empty" x="50%" y="50%" textAnchor="middle">Waiting for measurement data…</text>}
       </svg>
-      <div className="chart-axis-caption"><span>Older</span><span>Recent Trend · transient 300-sample window</span><span>Now</span></div>
+      <div className="chart-axis-caption"><span>Older</span><span>Recent Trend · {configuration.recentTrendCapacity}-sample window</span><span>Now</span></div>
     </div>
   )
 }

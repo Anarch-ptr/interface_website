@@ -22,7 +22,7 @@ export function AppShell({ activeView, onViewChange, children }: AppShellProps) 
         <div className="brand-copy">
           <p className="eyebrow">FILAMENT VISION</p>
           <h1>FilamentVision</h1>
-          <p>Dual-view diameter monitor</p>
+          <p>Camera diameter monitor</p>
         </div>
         <nav aria-label="Primary navigation">
           {navigationItems.map((item) => (
@@ -39,14 +39,13 @@ export function AppShell({ activeView, onViewChange, children }: AppShellProps) 
           ))}
         </nav>
         <div className="rail-foot">
-          <span className="live-dot" />
-          <div><strong>SIMULATION</strong><span>Local monitoring source</span></div>
+          <div><strong>RASPBERRY PI</strong><span>Backend monitoring source</span></div>
         </div>
       </aside>
       <div className="workspace">
         <header className="topbar">
           <div><p className="eyebrow">ENG5105 · DEVICE 01</p><p className="topbar-title">Filament Vision Sensor</p></div>
-          <div className="topbar-clock" aria-label="Monitoring source mode"><span className="live-dot" />Live simulation</div>
+          <div className="topbar-clock" aria-label="Monitoring source mode">Raspberry Pi UDP</div>
         </header>
         <main>{children}</main>
       </div>

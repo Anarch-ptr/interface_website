@@ -4,9 +4,10 @@ export function DiameterReadingPanel({ reading, configuration }: { reading: Diam
   const presentation = statusPresentation(reading?.status ?? MeasurementStatus.DISCONNECTED)
   return (
     <section className={`panel reading-panel status-${presentation.tone}`}>
-      <div className="reading-panel-header"><div><p className="panel-kicker">CURRENT DIAMETER</p><span>Fused measurement</span></div><span className={`severity-pill ${presentation.tone}`}>{presentation.label}</span></div>
-      <div className="diameter-core"><output aria-label="Current filament diameter">{reading ? reading.fusedDiameterMm.toFixed(3) : '—.———'}</output><span>mm</span></div>
+      <div className="reading-panel-header"><div><p className="panel-kicker">CURRENT DIAMETER</p><span>Vision measurement</span></div><span className={`severity-pill ${presentation.tone}`}>{presentation.label}</span></div>
+      <div className="diameter-core"><output aria-label="Current filament diameter">{reading ? reading.diameterMm.toFixed(3) : '—'}</output><span>mm</span></div>
       <p className="protocol-status">{presentation.protocolLabel}</p>
+      {reading ? <div className="measurement-context"><span aria-label="Measurement confidence">Confidence {reading.confidence === null ? 'Unavailable' : `${(reading.confidence * 100).toFixed(0)}%`}</span><time aria-label="Measurement captured at" dateTime={new Date(reading.timestamp).toISOString()}>{new Date(reading.timestamp).toLocaleTimeString()}</time></div> : <p className="measurement-context">Waiting for Raspberry Pi</p>}
       <div className="reading-details">
         <div><span>Target</span><strong>{configuration.targetDiameterMm.toFixed(3)} mm</strong></div>
         <div><span>Deviation</span><strong>{reading ? formatSigned(reading.deviationMm, ' mm') : '—'}</strong></div>
@@ -17,10 +18,12 @@ export function DiameterReadingPanel({ reading, configuration }: { reading: Diam
   )
 }
 
-function statusPresentation(status: MeasurementStatus) {
+function statusPresentation(status: string) {
   if (status === MeasurementStatus.OUT_OF_TOLERANCE) return { label: 'Critical', protocolLabel: 'OUT OF TOLERANCE', tone: 'critical' }
   if (status === MeasurementStatus.WARNING) return { label: 'Warning', protocolLabel: 'WARNING', tone: 'warning' }
   if (status === MeasurementStatus.NORMAL) return { label: 'Stable', protocolLabel: 'WITHIN TOLERANCE', tone: 'normal' }
+  if (status === MeasurementStatus.LOW_CONFIDENCE) return { label: 'Low confidence', protocolLabel: 'LOW CONFIDENCE', tone: 'warning' }
+  if (status !== MeasurementStatus.DISCONNECTED) return { label: 'Unavailable', protocolLabel: status.replaceAll('_', ' '), tone: 'muted' }
   return { label: 'Waiting', protocolLabel: 'AWAITING DATA', tone: 'muted' }
 }
 

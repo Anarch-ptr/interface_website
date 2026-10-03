@@ -10,6 +10,7 @@ import {
   VisionSourceState,
   type DiameterReading,
   type MonitoringConfiguration,
+  type BackendState, type BackendEvent,
 } from '../domain/monitoring'
 import type {
   FilamentDataSource,
@@ -41,6 +42,8 @@ class TestFilamentDataSource implements FilamentDataSource {
   state: VisionSourceState = VisionSourceState.STOPPED
   readonly readingListeners = new Set<ReadingListener>()
   readonly stateListeners = new Set<SourceStateListener>()
+  readonly backendListeners = new Set<(value: BackendState) => void>()
+  readonly eventListeners = new Set<(value: BackendEvent) => void>()
   configuration: MonitoringConfiguration | null = null
   startCount = 0
   stopCount = 0
@@ -54,6 +57,11 @@ class TestFilamentDataSource implements FilamentDataSource {
     this.stateListeners.add(listener)
     return () => this.stateListeners.delete(listener)
   }
+
+  subscribeBackendState(listener: (value: BackendState) => void) { this.backendListeners.add(listener); return () => this.backendListeners.delete(listener) }
+  subscribeEvents(listener: (value: BackendEvent) => void) { this.eventListeners.add(listener); return () => this.eventListeners.delete(listener) }
+  backend(value: BackendState) { for (const listener of this.backendListeners) listener(value) }
+  event(value: BackendEvent) { for (const listener of this.eventListeners) listener(value) }
 
   start(configuration: MonitoringConfiguration): void {
     this.configuration = { ...configuration }
@@ -88,7 +96,8 @@ class TestFilamentDataSource implements FilamentDataSource {
 
 function reading(diameterMm: number, timestamp: number): DiameterReading {
   return createDiameterReading({
-    fusedDiameterMm: diameterMm,
+    diameterMm,
+    confidence: 1,
     configuration: DEFAULT_MONITORING_CONFIGURATION,
     timestamp,
   })
@@ -103,6 +112,45 @@ function createFixture() {
 }
 
 describe('MonitoringStore', () => {
+  it('retains authoritative state after its reliable event leaves the bounded event list', () => {
+    const { source, store } = createFixture()
+    source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING',
+      eventSequence: 4, session: { id: 'session-1' }, latestMeasurement: null })
+    source.event({ type: 'state.changed', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 1000,
+      payload: { monitoring: 'COMPLETED', session: null, activeProducerCount: 0 } })
+    for (let sequence = 6; sequence < 307; sequence++) source.event({ type: 'measurement.sample', sequence,
+      deviceId: 'filamentvision-1', occurredAt: sequence, payload: {} })
+    expect(store.getLiveSnapshot().reliableEvents).toHaveLength(300)
+    expect(store.getLiveSnapshot().backendState).toMatchObject({ monitoring: 'COMPLETED', session: null })
+    store.dispose()
+  })
+
+  it('retains session lifecycle context independently of the bounded reliable event list', () => {
+    const { source, store } = createFixture()
+    source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING',
+      eventSequence: 4, session: null, latestMeasurement: null })
+    source.event({ type: 'session.started', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 1000,
+      payload: { id: 'session-1', startedAt: 1000, endedAt: null } })
+    expect(store.getLiveSnapshot().backendState?.session?.id).toBe('session-1')
+    source.event({ type: 'session.finalized', sequence: 6, deviceId: 'filamentvision-1', occurredAt: 2000,
+      payload: { id: 'session-1', startedAt: 1000, endedAt: 2000 } })
+    expect(store.getLiveSnapshot().backendState?.session).toBeNull()
+    expect(store.getLiveSnapshot().recoveredSessions).toEqual([{ id: 'session-1', startedAt: 1000, endedAt: 2000 }])
+    store.dispose()
+  })
+
+  it('retains a newer REST checkpoint while older lifecycle events replay', () => {
+    const { source, store } = createFixture()
+    source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'COMPLETED',
+      eventSequence: 10, session: null, latestMeasurement: null })
+    source.event({ type: 'state.changed', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 1000,
+      payload: { monitoring: 'RUNNING', session: { id: 'old' }, activeProducerCount: 1 } })
+    source.event({ type: 'session.started', sequence: 6, deviceId: 'filamentvision-1', occurredAt: 1000,
+      payload: { id: 'old', startedAt: 1000, endedAt: null } })
+    expect(store.getLiveSnapshot().backendState).toMatchObject({ monitoring: 'COMPLETED', session: null, eventSequence: 10 })
+    expect(store.getLiveSnapshot().recoveredSessions).toEqual([{ id: 'old', startedAt: 1000, endedAt: null }])
+    store.dispose()
+  })
   it('starts and stops each legacy fixture once per explicit lifecycle command', () => {
     const { source, store } = createFixture()
     expect(source.startCount).toBe(1)
@@ -133,7 +181,7 @@ describe('MonitoringStore', () => {
     let alarms = store.getAlarmSnapshot().events
     expect(alarms).toHaveLength(1)
     expect(alarms[0]?.status).toBe(MeasurementStatus.WARNING)
-    expect(alarms[0]?.peakReading.fusedDiameterMm).toBeCloseTo(1.772, 3)
+    expect(alarms[0]?.peakReading.diameterMm).toBeCloseTo(1.772, 3)
     expect(alarms[0]?.recoveredAt).toBeNull()
 
     source.emit(reading(1.78, 12))

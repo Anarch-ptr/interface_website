@@ -14,6 +14,8 @@ import {
   type MonitoringConfiguration,
   type BackendMeasurement, type BackendMeasurementRecord, type BackendEvent,
   type BackendRecovery, type BackendState, type CameraPreview,
+  type BackendSession,
+  backendAlarms,
 } from '../domain/monitoring'
 import type { FilamentDataSource, Unsubscribe } from '../services/FilamentDataSource'
 
@@ -233,7 +235,10 @@ export class MonitoringStore {
     readings.push(value)
     readings.sort((left, right) => left.measurement.timestamp - right.measurement.timestamp)
     const trend = readings.slice(-this.configuration.recentTrendCapacity)
-    this.replaceLiveSnapshot({ recentBackendTrend: Object.freeze(trend), latestBackendReading: trend.at(-1)?.measurement ?? null })
+    const latest = trend.at(-1)?.measurement ?? null
+    const current = this.liveSnapshot.latestBackendReading
+    this.replaceLiveSnapshot({ recentBackendTrend: Object.freeze(trend),
+      latestBackendReading: current && (!latest || current.timestamp > latest.timestamp) ? current : latest })
   }
 
   private handleRecovery(value: BackendRecovery): void {
@@ -247,7 +252,27 @@ export class MonitoringStore {
     const changes: Partial<LiveMonitoringSnapshot> = {
       reliableEvents: Object.freeze([...this.liveSnapshot.reliableEvents, value].slice(-300)),
     }
-    if (value.type === 'alarm.transition') changes.recoveredAlarms = mergeRecords(this.liveSnapshot.recoveredAlarms, [value.payload])
+    const state = this.liveSnapshot.backendState
+    const payload = value.payload
+    if (state && value.sequence > state.eventSequence && payload && typeof payload === 'object') {
+      if (value.type === 'state.changed' && 'monitoring' in payload && typeof payload.monitoring === 'string') {
+        changes.backendState = { ...state, eventSequence: value.sequence, monitoring: payload.monitoring }
+        if ('session' in payload && (payload.session === null || isBackendSession(payload.session))) {
+          changes.backendState.session = payload.session
+        }
+      }
+      if (value.type === 'session.started' && isBackendSession(payload)) {
+        changes.backendState = { ...state, eventSequence: value.sequence, session: payload }
+      }
+      if (value.type === 'session.finalized' && isBackendSession(payload) && payload.id === state.session?.id) {
+        changes.backendState = { ...state, eventSequence: value.sequence, session: null }
+      }
+    }
+    if (value.type === 'alarm.transition') {
+      changes.recoveredAlarms = mergeRecords(this.liveSnapshot.recoveredAlarms, [value.payload])
+      const alarm = backendAlarms([value.payload])[0]
+      if (state && alarm && value.sequence > state.eventSequence) changes.backendState = { ...state, eventSequence: value.sequence, alarm: alarm.to }
+    }
     if (value.type === 'error.raised') changes.recoveredErrors = mergeRecords(this.liveSnapshot.recoveredErrors, [value.payload])
     if ((value.type === 'session.started' || value.type === 'session.finalized') && value.payload &&
       typeof value.payload === 'object' && 'id' in value.payload && typeof value.payload.id === 'string') {
@@ -371,6 +396,10 @@ export class MonitoringStore {
   }
 }
 
+function isBackendSession(value: unknown): value is BackendSession {
+  return !!value && typeof value === 'object' && 'id' in value && typeof value.id === 'string'
+}
+
 function mergeRecords<T>(current: readonly T[], incoming: readonly T[]): readonly T[] {
   const records = new Map<unknown, T>()
   for (const value of [...current, ...incoming]) {
@@ -381,7 +410,7 @@ function mergeRecords<T>(current: readonly T[], incoming: readonly T[]): readonl
 }
 
 function isDiameterAlarmStatus(
-  status: MeasurementStatus,
+  status: string,
 ): status is AlarmEvent['status'] {
   return (
     status === MeasurementStatus.WARNING ||

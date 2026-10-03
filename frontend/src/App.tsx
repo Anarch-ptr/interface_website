@@ -21,7 +21,7 @@ function App({ store, runtime, api }: AppProps) {
 
   return (
     <AppShell activeView={activeView} onViewChange={setActiveView}>
-      {activeView === 'monitor' && <MonitoringDashboard store={store} />}
+      {activeView === 'monitor' && <MonitoringDashboard store={store} api={api} />}
       {activeView === 'alarms' && <AlarmHistory store={store} />}
       {activeView === 'settings' && <SettingsPanel store={store} api={api} />}
     </AppShell>

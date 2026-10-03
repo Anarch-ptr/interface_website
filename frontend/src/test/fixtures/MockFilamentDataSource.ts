@@ -103,11 +103,8 @@ export class MockFilamentDataSource implements FilamentDataSource {
       (diameterAMm * cameraAConfidence + diameterBMm * cameraBConfidence) /
       (cameraAConfidence + cameraBConfidence)
     const reading = createDiameterReading({
-      fusedDiameterMm,
-      diameterAMm,
-      diameterBMm,
-      cameraAConfidence,
-      cameraBConfidence,
+      diameterMm: fusedDiameterMm,
+      confidence: (cameraAConfidence + cameraBConfidence) / 2,
       configuration,
       timestamp: Date.now(),
     })

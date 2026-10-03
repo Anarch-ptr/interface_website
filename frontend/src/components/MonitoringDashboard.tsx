@@ -1,54 +1,49 @@
+import { toDiameterReading } from '../domain/measurement'
+import { backendAlarms, backendErrors } from '../domain/monitoring'
+import type { BackendApiClient } from '../services/BackendApiClient'
 import type { MonitoringStore } from '../state/MonitoringStore'
-import { useAlarmHistory, useLiveMonitoring, useMonitoringConfiguration } from '../state/useMonitoringStore'
+import { useLiveMonitoring, useMonitoringConfiguration } from '../state/useMonitoringStore'
 import { DiameterReadingPanel } from './DiameterReadingPanel'
+import { LiveCameraPreview } from './LiveCameraPreview'
 import { SystemHealth } from './SystemHealth'
 import { TrendChart } from './TrendChart'
 
-export function MonitoringDashboard({ store }: { store: MonitoringStore }) {
+export function MonitoringDashboard({ store, api }: { store: MonitoringStore; api?: BackendApiClient }) {
   const live = useLiveMonitoring(store)
-  const { events } = useAlarmHistory(store)
   const { configuration } = useMonitoringConfiguration(store)
-  const latestAlarm = events[0]
-  const reading = live.latestReading
+  const reading = live.latestBackendReading ? toDiameterReading(live.latestBackendReading, configuration) : null
+  const readings = live.recentBackendTrend.flatMap(record => {
+    const value = toDiameterReading(record.measurement, configuration)
+    return value ? [value] : []
+  })
+  const latestAlarm = backendAlarms(live.recoveredAlarms)[0]
+  const latestError = backendErrors(live.recoveredErrors)[0]
+  const alarm = live.backendState?.alarm ?? latestAlarm?.to
+  const alarmLabel = alarm?.level === 'CRITICAL' ? 'Critical' : alarm?.level === 'WARNING' ? 'Warning' : 'Within limits'
+  const direction = alarm?.direction === 'HIGH' ? 'High diameter' : alarm?.direction === 'LOW' ? 'Low diameter' : 'Within limits'
+  const sessionCount = live.recoveredSessions.length
 
   return (
     <section className="page" aria-labelledby="monitor-title">
-      <div className="page-heading">
-        <div><p className="eyebrow">REAL-TIME MONITORING</p><h2 id="monitor-title">System overview</h2><p>Fused dual-camera measurement with live deviation analysis.</p></div>
-        <div className="monitoring-badge"><span className="live-dot" />8 Hz live feed</div>
-      </div>
-      <SystemHealth live={live} />
+      <div className="page-heading"><div><p className="eyebrow">REAL-TIME MONITORING</p><h2 id="monitor-title">System overview</h2><p>Live camera measurement with diameter trend and alarm context.</p></div></div>
+      <SystemHealth live={live} api={api} />
       <div className="dashboard-grid">
+        <LiveCameraPreview preview={live.preview} />
         <DiameterReadingPanel reading={reading} configuration={configuration} />
         <section className="panel trend-panel" aria-labelledby="trend-title">
-          <div className="panel-heading"><div><p className="panel-kicker">RECENT TREND</p><h3 id="trend-title">Diameter stability</h3></div><span>{live.recentTrend.length} / 300 samples</span></div>
-          <TrendChart readings={live.recentTrend} configuration={configuration} />
-        </section>
-        <section className="panel metrics-panel" aria-labelledby="quality-title">
-          <div className="panel-heading"><div><p className="panel-kicker">DUAL-VIEW QUALITY</p><h3 id="quality-title">Measurement confidence</h3></div></div>
-          <div className="metric-list">
-            <Metric label="Camera A" value={reading ? `${(reading.cameraAConfidence * 100).toFixed(0)}%` : '—'} />
-            <Metric label="Camera B" value={reading ? `${(reading.cameraBConfidence * 100).toFixed(0)}%` : '—'} />
-            <Metric label="View difference" value={reading ? `${reading.shapeDifferenceMm.toFixed(3)} mm` : '—'} />
-            <Metric label="Buffer" value={`${live.recentTrend.length} / 300`} />
-          </div>
+          <div className="panel-heading"><div><p className="panel-kicker">RECENT TREND / HISTORY</p><h3 id="trend-title">Diameter stability</h3></div><span>{readings.length} / {configuration.recentTrendCapacity} samples</span></div>
+          <TrendChart readings={readings} configuration={configuration} />
         </section>
         <section className="panel alarm-summary" aria-labelledby="latest-alarm-title">
-          <div className="panel-heading"><div><p className="panel-kicker">LATEST ALARM</p><h3 id="latest-alarm-title">Event context</h3></div></div>
-          {latestAlarm ? (
-            <div className={`alarm-callout ${latestAlarm.status.toLowerCase()}`}>
-              <strong>{latestAlarm.status === 'OUT_OF_TOLERANCE' ? 'Critical' : 'Warning'} · {latestAlarm.direction === 'HIGH' ? 'High diameter' : 'Low diameter'}</strong>
-              <span>Peak {latestAlarm.peakReading.fusedDiameterMm.toFixed(3)} mm · {latestAlarm.recoveredAt ? 'Recovered' : 'Active'}</span>
-            </div>
-          ) : (
-            <div className="empty-compact"><span className="healthy-check">✓</span><div><strong>No abnormal events</strong><span>The simulated stream is inside configured limits.</span></div></div>
-          )}
+          <div className="panel-heading"><div><p className="panel-kicker">WARNING / ALARM</p><h3 id="latest-alarm-title">Event context</h3></div></div>
+          {alarm ? <div className={`alarm-callout ${alarm.level === 'CRITICAL' ? 'out_of_tolerance' : alarm.level.toLowerCase()}`}>
+            <strong>{alarm.level === 'NORMAL' ? 'Within limits' : `${alarmLabel} · ${direction}`}</strong>
+            {latestAlarm && <span>{latestAlarm.to.level === 'NORMAL' ? 'Recovered' : `Latest transition: ${latestAlarm.to.level}`} · {latestAlarm.diameterMm === null ? 'Diameter unavailable' : `${latestAlarm.diameterMm.toFixed(3)} mm`} · {new Date(latestAlarm.timestamp).toLocaleTimeString()}</span>}
+          </div> : <div className="empty-compact"><div><strong>Awaiting Backend alarm context</strong><span>Reliable alarm transitions appear here.</span></div></div>}
+          {latestError && <p className="backend-error" role="alert">{latestError.code}: {latestError.message}</p>}
+          <p className="session-context">{live.backendState?.session ? `Session ${live.backendState.session.id} · ` : ''}{sessionCount} retained {sessionCount === 1 ? 'session' : 'sessions'}</p>
         </section>
       </div>
     </section>
   )
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div><span>{label}</span><strong>{value}</strong></div>
 }

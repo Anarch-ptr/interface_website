@@ -38,9 +38,7 @@ export const MeasurementStatus = {
   WARNING: 'WARNING',
   OUT_OF_TOLERANCE: 'OUT_OF_TOLERANCE',
   LOW_CONFIDENCE: 'LOW_CONFIDENCE',
-  CAMERA_MISMATCH: 'CAMERA_MISMATCH',
-  CAMERA_A_FAILURE: 'CAMERA_A_FAILURE',
-  CAMERA_B_FAILURE: 'CAMERA_B_FAILURE',
+  INVALID: 'INVALID',
   DISCONNECTED: 'DISCONNECTED',
 } as const
 
@@ -57,21 +55,15 @@ export interface MonitoringConfiguration {
 
 export interface DiameterReading {
   timestamp: number
-  fusedDiameterMm: number
-  diameterAMm: number
-  diameterBMm: number
-  cameraAConfidence: number
-  cameraBConfidence: number
-  confidence: number
-  shapeDifferenceMm: number
+  diameterMm: number
+  confidence: number | null
   deviationMm: number
   absoluteDeviationMm: number
   deviationPercent: number
-  status: MeasurementStatus
+  status: string
 }
 
-// Neutral transport state consumed by the Backend source; the legacy reading
-// above is retained only until the separately scheduled dashboard migration.
+// Authoritative measurement transport; display preferences only derive deviation.
 export interface BackendMeasurement {
   evidence: readonly { cameraId: string; timestamp: number; sequence: number;
     pixelWidth: number | null; diameterMm: number | null; confidence: number | null;
@@ -104,10 +96,41 @@ export interface BackendRecovery {
 export interface BackendState {
   deviceId: string; connection: string; monitoring: string; eventSequence: number
   session: BackendSession | null; latestMeasurement: BackendMeasurement | null
+  alarm?: BackendAlarmState
 }
 export interface CameraPreview {
   url: string; width: number; height: number; timestamp: number; sourceSequence: number
 }
+
+export interface BackendAlarmState { level: string; direction: string; deviationPercent: number | null }
+export interface BackendAlarmTransition {
+  id: string; sessionId: string; timestamp: number; diameterMm: number | null
+  from: BackendAlarmState; to: BackendAlarmState
+}
+export interface BackendErrorRecord {
+  id: string; sessionId: string | null; timestamp: number; code: string; message: string
+}
+
+export function backendAlarms(values: readonly unknown[]): BackendAlarmTransition[] {
+  return values.filter((value): value is BackendAlarmTransition => isRecord(value) &&
+    typeof value.id === 'string' && typeof value.sessionId === 'string' && finite(value.timestamp) &&
+    (value.diameterMm === null || finite(value.diameterMm)) && alarmState(value.from) && alarmState(value.to))
+    .reverse().sort((left, right) => right.timestamp - left.timestamp)
+}
+
+export function backendErrors(values: readonly unknown[]): BackendErrorRecord[] {
+  return values.filter((value): value is BackendErrorRecord => isRecord(value) &&
+    typeof value.id === 'string' && (value.sessionId === null || typeof value.sessionId === 'string') &&
+    finite(value.timestamp) && typeof value.code === 'string' && typeof value.message === 'string')
+    .sort((left, right) => right.timestamp - left.timestamp)
+}
+
+function alarmState(value: unknown): value is BackendAlarmState {
+  return isRecord(value) && typeof value.level === 'string' && typeof value.direction === 'string' &&
+    (value.deviationPercent === null || finite(value.deviationPercent))
+}
+function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) }
+function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' }
 
 export const AlarmDirection = {
   HIGH: 'HIGH',
