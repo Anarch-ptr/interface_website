@@ -92,11 +92,11 @@ describe('Raspberry Pi expected-input profile', () => {
 // Compile-time contract checks: these obsolete controls cannot enter a typed draft.
 function contractChecks(profile: RaspberryPiUdpInputProfile) {
   // @ts-expect-error no second input
-  profile.cameraB
+  void profile.cameraB
   // @ts-expect-error fixed transport is metadata, never a profile selector
-  profile.transportMode
+  void profile.transportMode
   // @ts-expect-error no arbitrary framing
-  profile.applicationFraming
+  void profile.applicationFraming
   // @ts-expect-error only four image payloads
   const diameter: ImagePayload = { format: 'DIAMETER' }
   return diameter

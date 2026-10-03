@@ -176,15 +176,25 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
 .reference-threshold.critical { color: var(--critical); border-color: rgba(255, 140, 130, 0.3); background: var(--critical-soft); }
 .settings-reference > p:last-child { margin-top: 24px; color: var(--muted); font-size: 0.73rem; line-height: 1.65; }
 .udp-settings { margin-top: 22px; }
-.udp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-.udp-camera-card { padding: 0 0 20px; min-width: 0; }
-.udp-camera-card .panel-heading { align-items: center; }
+.raspberry-pi-settings { padding-bottom: 22px; min-width: 0; }
+.raspberry-pi-settings .panel-heading { flex-wrap: wrap; gap: 14px; }
+.udp-explanation { margin: 18px 22px; color: var(--muted); line-height: 1.6; font-size: .8rem; }
+.udp-section { margin: 20px 22px 0; padding: 16px; min-width: 0; border: 1px solid var(--border); border-radius: 9px; }
+.udp-section legend { padding: 0 8px; }
+.udp-section .udp-field, .udp-section .packet-inspector, .udp-section .inspector-open, .udp-section .udp-diagnostics { margin-inline: 0; }
+.udp-target { margin-top: 14px; color: var(--primary); overflow-wrap: anywhere; }
+.udp-revisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 22px; }
+.udp-profile-summary { border: 1px solid var(--border); border-radius: 9px; padding: 14px; min-width: 0; }
+.udp-profile-summary p, .udp-profile-summary summary { font-size: .75rem; line-height: 1.6; color: var(--muted); }
+.udp-profile-summary .udp-diagnostics { margin-inline: 0; }
+.udp-control input[type="checkbox"] { width: auto; }
+.udp-field [aria-invalid="true"] { border-color: var(--critical); }
+.udp-field small.field-error, .raspberry-pi-settings > .field-error { color: var(--critical); }
+.udp-settings button:disabled { opacity: .42; cursor: not-allowed; }
+.udp-settings :focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .udp-field { margin: 14px 22px 0; display: grid; gap: 6px; color: var(--muted); font-size: .72rem; }
-.udp-field input, .udp-field select, .udp-advanced input, .udp-advanced select { width: 100%; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: rgba(11,17,23,.62); color: var(--text); }
-.udp-advanced { margin: 18px 22px 0; padding: 12px; border: 1px solid var(--border); border-radius: 9px; }
-.udp-advanced summary { cursor: pointer; font-weight: 650; }
-.udp-advanced p, .udp-muted { margin: 10px 0; color: var(--quiet); font-size: .67rem; }
-.udp-advanced fieldset { margin-top: 12px; padding: 10px; border: 1px solid var(--border); }
+.udp-field input, .udp-field select { width: 100%; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: rgba(11,17,23,.62); color: var(--text); }
+.udp-muted { margin: 10px 0; color: var(--quiet); font-size: .67rem; }
 .udp-diagnostics { margin: 10px 22px 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .udp-diagnostics div { padding: 8px; border: 1px solid var(--border); border-radius: 7px; }
 .udp-diagnostics dt { color: var(--quiet); font-size: .6rem; }
@@ -197,7 +207,9 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
 .inspector-toolbar strong { margin-right: auto; }
 .inspector-toolbar select, .inspector-toolbar button, .inspector-actions button { padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); }
 .inspector-region { margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; }
-.inspector-region h5 { display: inline; margin-right: 8px; }
+.inspector-region h4 { display: inline; margin-right: 8px; }
+.inspector-region p { color: var(--muted); font-size: .72rem; line-height: 1.6; overflow-wrap: anywhere; }
+.udp-diagnostics dd { overflow-wrap: anywhere; }
 .inspector-region span, .inspector-region small { color: var(--quiet); font-size: .64rem; }
 .inspector-region pre { max-height: 110px; overflow: auto; white-space: pre-wrap; color: var(--primary); font: .67rem Consolas, monospace; }
 .inspector-actions { margin-top: 10px; display: flex; gap: 8px; }
@@ -221,7 +233,7 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
   .health-strip { grid-template-columns: repeat(2, 1fr); }
   .health-item:nth-child(2) { border-right: 0; }
   .health-item:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
-  .dashboard-grid, .settings-layout, .udp-grid { grid-template-columns: 1fr; }
+  .dashboard-grid, .settings-layout, .udp-revisions { grid-template-columns: 1fr; }
   .reading-panel, .trend-panel { min-height: 410px; }
 }
 

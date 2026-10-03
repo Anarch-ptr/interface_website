@@ -8,9 +8,9 @@ import {
   type ConfigurationStorage,
 } from './config/monitoringConfig'
 import { createDiameterReading } from './domain/measurement'
-import { defaultUdpProfiles } from './config/udpInputProfile'
 import { BackendApiClient } from './services/BackendApiClient'
-import type { CameraId, UdpConfigurationState, UdpDiagnostics } from './domain/udpInput'
+import type { NetworkInterfaces, UdpConfigurationState, UdpDiagnostics } from './domain/raspberryPiUdpInput'
+import { networkInterfaces, udpDiagnostics, udpState } from './test/raspberryPiUdpFixtures'
 import {
   VisionSourceState,
   type DiameterReading,
@@ -131,26 +131,19 @@ describe('FilamentVision application', () => {
     }
   })
 
-  it('characterizes the two UDP cards and obsolete transport controls as migration targets', async () => {
+  it('integrates one Raspberry Pi expected-input form alongside monitoring settings', async () => {
     const api = udpApiFixture()
     const user = userEvent.setup()
     const { runtime, view } = createFixture(api)
     try {
       await user.click(screen.getByRole('button', { name: 'Settings' }))
-      await screen.findByRole('heading', { name: 'UDP Input Settings' })
-      expect(screen.getByText('CAMERA A')).toBeVisible()
-      expect(screen.getByText('CAMERA B')).toBeVisible()
-      expect(screen.getByLabelText('Camera A Listen Port')).toHaveValue(5101)
-      expect(screen.getByLabelText('Camera B Listen Port')).toHaveValue(5102)
-      for (const camera of ['A', 'B']) {
-        const transport = screen.getByLabelText(`Camera ${camera} Transport Mode`)
-        expect(within(transport).getByRole('option', { name: 'Single Datagram' })).toBeInTheDocument()
-        const payload = screen.getByLabelText(`Camera ${camera} Payload Format`)
-        expect(within(payload).getByRole('option', { name: 'DIAMETER' })).toBeInTheDocument()
-      }
-      expect(screen.getAllByText('Advanced UDP Framing')).toHaveLength(2)
-      await user.selectOptions(screen.getByLabelText('Camera B Payload Format'), 'DIAMETER')
-      expect(screen.getByText('Fusion confidence is a Backend default weight, not device-reported confidence.')).toBeVisible()
+      const form = await screen.findByRole('form', { name: 'Raspberry Pi UDP Input' })
+      expect(within(form).getByLabelText('UDP Listen Port')).toHaveValue(5000)
+      expect(within(form).getByLabelText('Payload Format')).toHaveValue('JPEG')
+      expect(screen.getByLabelText('Target diameter (mm)')).toHaveValue(1.75)
+      expect(screen.queryByText('CAMERA A')).not.toBeInTheDocument()
+      expect(screen.queryByText('CAMERA B')).not.toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'Inspect Packet' })).toHaveLength(1)
     } finally {
       view.unmount()
       await act(async () => Promise.resolve())
@@ -241,14 +234,16 @@ function assertMigrationTargetLabels(): void {
 function udpApiFixture(): BackendApiClient {
   // Keep App/Settings real; isolate only the remote API boundary to deterministic data.
   return new class extends BackendApiClient {
-    override async getUdpConfiguration(): Promise<UdpConfigurationState> {
-      return { savedRevision: 1, appliedRevision: 1, configuration: defaultUdpProfiles() }
+    override async getRaspberryPiUdpConfiguration(): Promise<UdpConfigurationState> {
+      return udpState()
     }
 
-    override async getUdpDiagnostics(_device: string, camera: CameraId): Promise<UdpDiagnostics> {
-      return { cameraId: camera, transportMode: 'STRUCTURED_CHUNKED', datagramsReceived: 0,
-        bytesReceived: 0, framesCompleted: 0, framesDropped: 0, invalidHeader: 0,
-        invalidFooter: 0, invalidPayloadSize: 0, decodeFailures: 0, sourceFilteredDatagrams: 0 }
+    override async getRaspberryPiUdpDiagnostics(): Promise<UdpDiagnostics> {
+      return udpDiagnostics
+    }
+
+    override async getNetworkInterfaces(): Promise<NetworkInterfaces> {
+      return networkInterfaces
     }
   }()
 }
