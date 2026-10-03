@@ -3,6 +3,10 @@ package com.filamentvision.backend.api
 import com.filamentvision.backend.preview.*
 import com.filamentvision.core.event.SequencedEventHub
 import com.filamentvision.core.frame.CameraId
+import com.filamentvision.core.frame.CameraFrame
+import com.filamentvision.core.frame.FrameLease
+import com.filamentvision.core.frame.PixelBuffer
+import com.filamentvision.core.frame.PixelFormat
 import com.filamentvision.core.preview.*
 import io.ktor.client.plugins.websocket.*
 import io.ktor.server.testing.*
@@ -15,6 +19,90 @@ import java.io.ByteArrayInputStream
 import javax.imageio.ImageIO
 
 class PreviewWebSocketBackpressureTest {
+    @Test fun configuredHighPreviewRateIsCappedWithoutRejectingValidMonitoringConfiguration() {
+        var now = 0L
+        var fps = 60
+        val publisher = SingleCameraPreviewPublisher("device", { fps }, { now })
+        assertTrue(publisher.tryPublish(cameraPreviewSource(1)))
+        now = 16_666_667
+        assertFalse(publisher.tryPublish(cameraPreviewSource(2)))
+        now = 33_333_334
+        assertTrue(publisher.tryPublish(cameraPreviewSource(3)))
+        fps = 5
+        now += 199_999_999
+        assertFalse(publisher.tryPublish(cameraPreviewSource(4)))
+        now++
+        assertTrue(publisher.tryPublish(cameraPreviewSource(5)))
+    }
+
+    @Test fun singleCameraPublisherAdmitsFpsBeforeSamplingAndKeepsOnlyNewestOwnedPreview() {
+        var now = 0L
+        val allocations = mutableListOf<Int>()
+        var released = 0
+        val publisher = SingleCameraPreviewPublisher("device", { 5 }, { now }, PreviewFrameDownsampler { allocations.add(it) })
+        val first = cameraPreviewSource(1, FrameLease { released++ })
+        assertTrue(publisher.tryPublish(first))
+        first.close()
+        assertEquals(1, released) // Preview cannot retain the decoded-frame permit.
+        assertEquals(PreviewKey("device", CameraId("camera"), PreviewStage.RAW), publisher.key)
+        repeat(1000) { assertFalse(publisher.tryPublish(cameraPreviewSource(it + 2L))) }
+        assertEquals(listOf(8), allocations)
+        assertEquals(1L, publisher.hub.latest(publisher.key)!!.sourceSequence)
+        now = 199_999_999
+        assertFalse(publisher.tryPublish(cameraPreviewSource(1002)))
+        now = 200_000_000
+        assertTrue(publisher.tryPublish(cameraPreviewSource(1003)))
+        assertEquals(listOf(8, 8), allocations)
+        assertEquals(1003L, publisher.hub.latest(publisher.key)!!.sourceSequence)
+        assertEquals(1, publisher.hub.metrics.retainedFrames)
+        assertEquals(1L, publisher.hub.metrics.replacedLatestFrames)
+        assertThrows(IllegalArgumentException::class.java) { publisher.hub.latest(previewKey("A")) }
+        publisher.hub.publish(PreviewFrame(publisher.key, 0, 0, 1024, 1024, PreviewFormat.ARGB32, ByteArray(4 * 1024 * 1024)))
+        assertThrows(IllegalArgumentException::class.java) {
+            publisher.hub.publish(PreviewFrame(publisher.key, 0, 0, 1025, 1024, PreviewFormat.ARGB32, ByteArray(1025 * 1024 * 4)))
+        }
+    }
+
+    @Test fun singleCameraPreviewCongestionPreservesEveryEventWebSocketEnvelope() = testApplication {
+        var now = 0L
+        val publisher = SingleCameraPreviewPublisher("device", { 30 }, { now })
+        val events = SequencedEventHub(setOf("device"), 1100)
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val png = PngPreviewEncoder()
+        val encoder = PreviewEncoder { frame ->
+            if (frame.sourceSequence == 1L) { entered.complete(Unit); release.await() }
+            png.encode(frame)
+        }
+        application {
+            installEventWebSocket(eventBackend(events), events, setOf("device"))
+            installPreviewWebSocket(publisher.hub, setOf(publisher.key), encoder)
+        }
+        val ws = createClient { install(WebSockets) }
+        ws.webSocket("/api/v1/events") {
+            val eventSocket = this
+            assertEquals("state.snapshot", nextJson()["type"].asText())
+            ws.webSocket("/api/v1/previews?cameraId=camera&stage=RAW&maxFps=30") {
+                assertTrue(publisher.tryPublish(cameraPreviewSource(1)))
+                withTimeout(3000) { entered.await() }
+                repeat(1000) { index ->
+                    now += 33_333_334
+                    assertTrue(publisher.tryPublish(cameraPreviewSource(index + 2L)))
+                    events.publish(error())
+                }
+                assertEquals(1, publisher.hub.metrics.pendingFrames)
+                assertEquals(1, publisher.hub.metrics.retainedFrames)
+                assertEquals(999L, publisher.hub.metrics.droppedFrames)
+                repeat(1000) { assertEquals(it + 1L, eventSocket.nextJson()["sequence"].asLong()) }
+                release.complete(Unit)
+                assertImage(1, "camera", "RAW"); assertImage(1001, "camera", "RAW")
+                close()
+            }
+            close()
+        }
+        withTimeout(3000) { while (publisher.hub.metrics.subscribers != 0) delay(5) }
+        assertEquals(0, publisher.hub.metrics.pendingFrames)
+    }
+
     @Test fun suspendedClientSendBoundsPendingAndRateWaitSelectsNewestWithInjectedClock() = runBlocking {
         val key = previewKey(); val hub = LatestPreviewHub(setOf(key), 100, 2)
         var now = 0L
@@ -184,6 +272,9 @@ class PreviewWebSocketBackpressureTest {
 }
 
 internal fun previewKey(camera: String = "A", stage: PreviewStage = PreviewStage.RAW) = PreviewKey("device", CameraId(camera), stage)
+private fun cameraPreviewSource(sequence: Long, lease: FrameLease = FrameLease()) = CameraFrame(CameraId("camera"),
+    2000 + sequence, 0, 2, 1, PixelFormat.ARGB32, PixelBuffer.ints(intArrayOf(0xff112233.toInt(), 0xffabcdef.toInt())),
+    0, false, sequence, lease = lease)
 internal fun previewFrame(key: PreviewKey, sequence: Long) = PreviewFrame(key, 2000 + sequence, sequence, 2, 1,
     PreviewFormat.ARGB32, byteArrayOf(-1, 0x11, 0x22, 0x33, -1, 0xab.toByte(), 0xcd.toByte(), 0xef.toByte()))
 internal suspend fun DefaultClientWebSocketSession.assertImage(sequence: Long, camera: String, stage: String) {
