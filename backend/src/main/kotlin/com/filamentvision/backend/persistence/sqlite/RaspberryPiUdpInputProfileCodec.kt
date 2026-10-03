@@ -16,7 +16,7 @@ object RaspberryPiUdpInputProfileCodec {
                 when (val selection = canonical.networkInterface) {
                     NetworkInterfaceSelection.Auto -> out.writeUTF("AUTO")
                     is NetworkInterfaceSelection.Specific -> {
-                        out.writeUTF("SPECIFIC"); out.writeUTF(selection.interfaceId); out.writeUTF(selection.ipv4)
+                        out.writeUTF("SPECIFIC"); out.writeInterfaceId(selection.interfaceId); out.writeUTF(selection.ipv4)
                     }
                 }
                 out.writeInt(canonical.listenPort)
@@ -50,7 +50,7 @@ object RaspberryPiUdpInputProfileCodec {
             val enabled = input.readBoolean()
             val network = when (val type = input.readUTF()) {
                 "AUTO" -> NetworkInterfaceSelection.Auto
-                "SPECIFIC" -> NetworkInterfaceSelection.Specific(input.readUTF(), input.readUTF())
+                "SPECIFIC" -> NetworkInterfaceSelection.Specific(input.readInterfaceId(), input.readUTF())
                 else -> throw IllegalArgumentException("Unknown network interface selection $type")
             }
             val port = input.readInt()
@@ -78,6 +78,18 @@ object RaspberryPiUdpInputProfileCodec {
         require(validation.isValid) { "Invalid Raspberry Pi UDP profile: ${validation.errors}" }
         return profile.copy(envelope = DatagramEnvelopeProfile(
             normalizeTwoByteHex(profile.envelope.headerHex), normalizeTwoByteHex(profile.envelope.footerHex)))
+    }
+
+    private fun DataOutputStream.writeInterfaceId(value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        writeInt(bytes.size)
+        write(bytes)
+    }
+
+    private fun DataInputStream.readInterfaceId(): String {
+        val length = readInt()
+        require(length >= 0 && length <= available()) { "Invalid interface identifier byte length" }
+        return ByteArray(length).also(::readFully).decodeToString(throwOnInvalidSequence = true)
     }
 
     private fun DataOutputStream.writeNullableInt(value: Int?) { writeBoolean(value != null); value?.let(::writeInt) }

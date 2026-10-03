@@ -8,6 +8,50 @@ import java.io.DataInputStream
 import java.nio.ByteBuffer
 
 class RaspberryPiUdpInputProfileCodecTest {
+    @Test fun approvedInterfaceIdentifiersRoundTripAcrossUnsignedShortByteBoundary() {
+        val identifiers = listOf("a".repeat(65_536), "a".repeat(65_535),
+            "界".repeat(21_845), "界".repeat(21_846), "😀".repeat(16_384))
+        for (identifier in identifiers) {
+            val expected = specific(identifier)
+            assertTrue(RaspberryPiUdpInputProfileValidator().validate(expected).isValid)
+            val encoded = encode(expected)
+            assertEquals(expected, decode(encoded))
+        }
+    }
+
+    @Test fun interfaceIdentifierUsesExactStandardUtf8ForUnicodeAndNullCharacter() {
+        val identifier = "Wi-Fi接口😀\u0000"
+        val utf8 = byteArrayOf(0x57, 0x69, 0x2d, 0x46, 0x69, 0xe6.toByte(), 0x8e.toByte(), 0xa5.toByte(),
+            0xe5.toByte(), 0x8f.toByte(), 0xa3.toByte(), 0xf0.toByte(), 0x9f.toByte(), 0x98.toByte(), 0x80.toByte(), 0)
+        val expected = specific(identifier)
+        assertTrue(RaspberryPiUdpInputProfileValidator().validate(expected).isValid)
+        val encoded = encode(expected)
+        assertEquals(16, ByteBuffer.wrap(encoded, 15, 4).int)
+        assertArrayEquals(utf8, encoded.copyOfRange(19, 35))
+        assertEquals(expected, decode(encoded))
+    }
+
+    @Test fun declaredIdentifierLengthRejectsNegativeAndBeyondRemainingBytesBeforeReading() {
+        val valid = encode(specific("wifi-1"))
+        // Prefix: 4-byte version, enabled byte, 2-byte UTF size + 8-byte SPECIFIC tag.
+        val remainingAfterLength = valid.size - 19
+        for (length in listOf(-1, Int.MIN_VALUE, remainingAfterLength + 1, Int.MAX_VALUE)) {
+            val corrupt = valid.copyOf().also { ByteBuffer.wrap(it, 15, 4).putInt(length) }
+            val before = corrupt.copyOf()
+            val error = assertThrows(IllegalArgumentException::class.java) { decode(corrupt) }
+            // Length validation itself rejects the declaration, before allocation or subsequent field reads.
+            assertNull(error.cause)
+            assertArrayEquals(before, corrupt)
+        }
+        assertThrows(IllegalArgumentException::class.java) { decode(valid.copyOf(17)) }
+    }
+
+    @Test fun malformedUtf8IdentifierIsRejectedInsteadOfReplaced() {
+        val valid = encode(specific("wifi-1"))
+        val corrupt = valid.copyOf().also { it[19] = 0xff.toByte() }
+        assertThrows(IllegalArgumentException::class.java) { decode(corrupt) }
+    }
+
     @Test fun versionOneRoundTripsDisabledDefaults() {
         val expected = RaspberryPiUdpInputProfile.defaults()
         val encoded = encode(expected)
@@ -105,4 +149,6 @@ class RaspberryPiUdpInputProfileCodecTest {
 
     private fun encode(profile: RaspberryPiUdpInputProfile) = RaspberryPiUdpInputProfileCodec.encode(profile)
     private fun decode(bytes: ByteArray) = RaspberryPiUdpInputProfileCodec.decode(bytes)
+    private fun specific(identifier: String) = RaspberryPiUdpInputProfile.defaults().copy(
+        networkInterface = NetworkInterfaceSelection.Specific(identifier, "192.168.1.10"))
 }
