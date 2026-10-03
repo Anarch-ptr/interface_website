@@ -4,6 +4,8 @@ import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata
 import com.filamentvision.backend.input.transport.StructuredTransportHeader
 import java.util.UUID
+import java.util.Timer
+import java.util.TimerTask
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -11,28 +13,45 @@ import kotlin.concurrent.withLock
 class PacketInspector(
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val leaseDurationMillis: Long = 30_000,
-) {
+    private val scheduleExpiry: (delayMillis: Long, action: () -> Unit) -> AutoCloseable = ::scheduleInspectorExpiry,
+) : AutoCloseable {
     private val lock = ReentrantLock()
     private val leases = linkedMapOf<String, PacketInspectorLease>()
     private var snapshot: PacketInspectorSnapshot? = null
     private var sequence = 0L
     private var rawCaptureId = 0L
+    private var expiryTask: AutoCloseable? = null
+    private var expiryDeadline: Long? = null
+    private var expiryGeneration = 0L
+    private var closed = false
     @Volatile private var enabled = false
     @Volatile var previewCopies: Long = 0
         private set
 
     fun createLease(previewBytes: Int): PacketInspectorLease = lock.withLock {
+        check(!closed) { "Packet Inspector is closed" }
         require(previewBytes in ALLOWED_PREVIEW_BYTES)
         expire()
         PacketInspectorLease(UUID.randomUUID().toString(), previewBytes,
-            Math.addExact(clockMillis(), leaseDurationMillis)).also { leases[it.id] = it; enabled = true }
+            Math.addExact(clockMillis(), leaseDurationMillis)).also {
+            leases[it.id] = it; enabled = true
+            armExpiry()
+        }
     }
 
     fun releaseLease(id: String): Boolean = lock.withLock {
         expire()
         val removed = leases.remove(id) != null
         discardIfInactive()
+        armExpiry()
         removed
+    }
+
+    override fun close() = lock.withLock {
+        if (closed) return
+        closed = true
+        leases.clear()
+        discardIfInactive()
     }
 
     fun captureEnabled(): Boolean = observe(false) { true }
@@ -48,6 +67,7 @@ class PacketInspector(
         val checkEnvelope = status != RawParseStatus.SOURCE_IP_MISMATCH && status != RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED
         val raw = RawDatagramInspection(metadata.source.address.hostAddress, metadata.source.port, profile.listenPort,
             length, metadata.receivedAtMonotonicNanos, status, header, footer,
+            boundary(bytes, length, 0), boundary(bytes, length, length - 2),
             if (checkEnvelope) matches(bytes, length, 0, header) else null,
             if (checkEnvelope) matches(bytes, length, length - 2, footer) else null,
             bytes.copyOfRange(0, minOf(length, limit)))
@@ -115,7 +135,31 @@ class PacketInspector(
     }
     private fun discardIfInactive() {
         enabled = leases.isNotEmpty()
-        if (!enabled) { snapshot = null; rawCaptureId = 0 }
+        if (!enabled) { snapshot = null; rawCaptureId = 0; cancelExpiry() }
+    }
+    private fun cancelExpiry() {
+        expiryGeneration++
+        expiryTask?.close()
+        expiryTask = null
+        expiryDeadline = null
+    }
+    /** One deadline while leases exist; never a polling loop or part of packet processing. */
+    private fun armExpiry() {
+        if (closed || leases.isEmpty()) return
+        val next = leases.values.minOf { it.expiresAtMillis }
+        if (expiryDeadline == next) return
+        cancelExpiry()
+        val generation = expiryGeneration
+        expiryDeadline = next
+        expiryTask = scheduleExpiry((next - clockMillis()).coerceAtLeast(0)) {
+            lock.withLock {
+                if (closed || generation != expiryGeneration) return@withLock
+                expiryTask = null
+                expiryDeadline = null
+                expire()
+                armExpiry()
+            }
+        }
     }
     private inline fun <T> observe(skipped: T, block: () -> T): T {
         if (!enabled || !lock.tryLock()) return skipped
@@ -132,9 +176,25 @@ class PacketInspector(
             (bytes[offset].toInt() and 0xff) == hex.substring(0, 2).toInt(16) &&
             (bytes[offset + 1].toInt() and 0xff) == hex.substring(3, 5).toInt(16)
 
+    /** Preserve actual wire boundaries even when the footer is outside the owned prefix. */
+    private fun boundary(bytes: ByteArray, length: Int, offset: Int): Int? =
+        if (offset < 0 || offset + 2 > length) null
+        else ((bytes[offset].toInt() and 0xff) shl 8) or (bytes[offset + 1].toInt() and 0xff)
+
     companion object {
         /** Aggregate unique owned raw + completed-frame preview bytes. Transport owns no bytes. */
         const val HARD_MAX_PREVIEW_BYTES = 512
         val ALLOWED_PREVIEW_BYTES = setOf(64, 128, 256)
     }
+}
+
+/** Created only for an active deadline; cancellation or firing terminates its daemon thread. */
+private fun scheduleInspectorExpiry(delayMillis: Long, action: () -> Unit): AutoCloseable {
+    val timer = Timer("packet-inspector-expiry", true)
+    timer.schedule(object : TimerTask() {
+        override fun run() {
+            try { action() } finally { timer.cancel() }
+        }
+    }, delayMillis)
+    return AutoCloseable { timer.cancel() }
 }

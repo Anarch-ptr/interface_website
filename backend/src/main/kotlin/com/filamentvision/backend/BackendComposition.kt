@@ -183,6 +183,7 @@ class BackendComposition private constructor(
             closed = true
             try { runtime.close() }
             finally {
+                (inputSource as? RaspberryPiUdpInputSource)?.packetInspector?.close()
                 stateObserver.cancelAndJoin()
                 scope.coroutineContext[Job]!!.cancelAndJoin()
                 previews.close()

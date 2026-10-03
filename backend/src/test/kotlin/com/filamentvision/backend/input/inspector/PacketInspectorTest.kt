@@ -12,15 +12,22 @@ import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import javax.imageio.ImageIO
 import org.junit.Assert.*
+import org.junit.After
 import org.junit.Test
 
 class PacketInspectorTest {
     private var now = 1_000L
-    private val inspector = PacketInspector(clockMillis = { now }, leaseDurationMillis = 500)
+    private val deadlines = ManualExpiryScheduler { now }
+    private val inspector = PacketInspector(clockMillis = { now }, leaseDurationMillis = 500,
+        scheduleExpiry = deadlines::schedule)
     private val profile = RaspberryPiUdpInputProfile.defaults().copy(payload = ImagePayloadProfile.Gray8(2, 1))
     private val metadata = ReceivedDatagramMetadata(InetSocketAddress("192.0.2.10", 9000), 123, 456)
+
+    @After fun closeInspector() = inspector.close()
 
     @Test fun leasesShareOneLatestAndReleaseOrExpiryDiscardsAllOwnedBytes() {
         val first = inspector.createLease(128)
@@ -40,6 +47,59 @@ class PacketInspectorTest {
         assertFalse(inspector.captureEnabled())
         assertEquals(0, inspector.retainedSnapshotCount)
         assertEquals(0, inspector.retainedPreviewBytes)
+    }
+
+    @Test fun passiveExpiryClearsLeaseAndPreviewWithoutAnyInspectorCall() {
+        val passive = PacketInspector(leaseDurationMillis = 100)
+        try {
+            passive.createLease(256)
+            passive.captureRaw(ByteArray(600), 600, metadata, profile, RawParseStatus.VALID)
+            assertEquals(1 to 256, retainedStateWithoutCleanup(passive))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            // Reflection reads state only; no API/tap/getter can mask a missing expiry task.
+            while (retainedStateWithoutCleanup(passive) != (0 to 0) && System.nanoTime() < deadline) Thread.sleep(5)
+            assertEquals(0 to 0, retainedStateWithoutCleanup(passive))
+        } finally { passive.close() }
+    }
+
+    @Test fun deadlinesRearmForRemainingLeasesAndPassivelyReleaseAllRetention() {
+        assertTrue(deadlines.pending.isEmpty())
+        inspector.createLease(64)
+        now += 100
+        inspector.createLease(256)
+        capture(ByteArray(600))
+        assertEquals(listOf(1500L), deadlines.pending.map { it.at })
+        now = 1499; deadlines.runDue()
+        assertEquals(2 to 256, retainedStateWithoutCleanup(inspector))
+        now = 1500; deadlines.runDue()
+        assertEquals(1 to 256, retainedStateWithoutCleanup(inspector))
+        assertEquals(listOf(1600L), deadlines.pending.map { it.at })
+        now = 1600; deadlines.runDue()
+        assertEquals(0 to 0, retainedStateWithoutCleanup(inspector))
+        assertTrue(deadlines.pending.isEmpty())
+    }
+
+    @Test fun releaseAndIdempotentCloseCancelDeadlinesAndStaleCallbacksCannotRearmOrExpireNewLeases() {
+        val first = inspector.createLease(64)
+        val stale = deadlines.pending.single().action
+        capture(ByteArray(60))
+        assertTrue(inspector.releaseLease(first.id))
+        assertTrue(deadlines.pending.isEmpty())
+        assertEquals(0 to 0, retainedStateWithoutCleanup(inspector))
+        now = 1100
+        inspector.createLease(128)
+        capture(ByteArray(60))
+        stale()
+        assertEquals(listOf(1600L), deadlines.pending.map { it.at })
+        assertEquals(1 to 60, retainedStateWithoutCleanup(inspector))
+        val closing = deadlines.pending.single().action
+        inspector.close(); inspector.close()
+        closing(); stale()
+        assertTrue(deadlines.pending.isEmpty())
+        assertEquals(0 to 0, retainedStateWithoutCleanup(inspector))
+        assertFalse(inspector.captureEnabled())
+        assertEquals(0L, capture(ByteArray(60)))
+        assertThrows(IllegalStateException::class.java) { inspector.createLease(64) }
     }
 
     @Test fun onlyRequestedSizesAreAcceptedAndEachLeaseBoundsTheSharedSnapshot() {
@@ -69,8 +129,10 @@ class PacketInspectorTest {
         assertEquals("192.0.2.10", snapshot.raw.sourceIpv4)
         assertEquals(9000, snapshot.raw.sourcePort)
         assertEquals(5000, snapshot.raw.backendListenPort)
-        assertEquals("AA 01", snapshot.raw.headerHex)
-        assertEquals("0D 0A", snapshot.raw.footerHex)
+        assertEquals("AA 01", snapshot.raw.expectedHeaderHex)
+        assertEquals("0D 0A", snapshot.raw.expectedFooterHex)
+        assertEquals(0xaa01, snapshot.raw.actualHeader)
+        assertEquals(0x0d0a, snapshot.raw.actualFooter)
         assertEquals(true, snapshot.raw.headerMatched)
         assertEquals(true, snapshot.raw.footerMatched)
         val transport = snapshot.raw.transport!!
@@ -120,6 +182,40 @@ class PacketInspectorTest {
         }
         assertEquals(0, views)
         assertEquals(0, decodes)
+    }
+
+    @Test fun longMalformedDatagramsExposeActualEnvelopeBeyondRawPreviewWithoutExtraArrays() {
+        val lease = inspector.createLease(64)
+        for ((header, footer, status) in listOf(
+            Triple(byteArrayOf(0x7e, 0xff.toByte()), byteArrayOf(13, 10), RawParseStatus.HEADER_MISMATCH),
+            Triple(byteArrayOf(0xaa.toByte(), 1), byteArrayOf(0xbe.toByte(), 0xef.toByte()), RawParseStatus.FOOTER_MISMATCH),
+        )) {
+            val packet = wire(ByteArray(300)).also { header.copyInto(it); footer.copyInto(it, it.size - 2) }
+            assertTrue(receive(processor(), packet) is ProcessorResult.Rejected)
+            packet.fill(0) // Neither boundary metadata nor preview may borrow the receive array.
+            val snapshot = inspector.latest(lease.id)!!
+            val raw = ObjectMapper().valueToTree<JsonNode>(snapshot.toDto())["rawDatagram"]
+            assertEquals(status.name, raw["status"].asText())
+            assertEquals(if (status == RawParseStatus.HEADER_MISMATCH) "7E FF" else "AA 01", raw["headerHex"].asText())
+            assertEquals(if (status == RawParseStatus.FOOTER_MISMATCH) "BE EF" else "0D 0A", raw["footerHex"].asText())
+            assertEquals("AA 01", raw.path("expectedHeaderHex").asText())
+            assertEquals("0D 0A", raw.path("expectedFooterHex").asText())
+            assertEquals(status != RawParseStatus.HEADER_MISMATCH, raw["headerMatched"].asBoolean())
+            assertEquals(status != RawParseStatus.FOOTER_MISMATCH, raw["footerMatched"].asBoolean())
+            assertEquals(64, inspector.retainedPreviewBytes)
+            assertEquals(64, snapshot.raw.preview.size)
+            assertNull(snapshot.raw.transport)
+        }
+    }
+
+    @Test fun absentTwoByteBoundariesAreNullInsteadOfInventingConfiguredPacketBytes() {
+        val lease = inspector.createLease(64)
+        receive(processor(), byteArrayOf(0xaa.toByte()))
+        val raw = ObjectMapper().valueToTree<JsonNode>(inspector.latest(lease.id)!!.toDto())["rawDatagram"]
+        assertTrue(raw["headerHex"].isNull)
+        assertTrue(raw["footerHex"].isNull)
+        assertEquals("AA 01", raw.path("expectedHeaderHex").asText())
+        assertEquals("0D 0A", raw.path("expectedFooterHex").asText())
     }
 
     @Test fun completedFramesExposeAllFourFormatsDimensionsAndDecodeFailures() {
@@ -225,7 +321,7 @@ class PacketInspectorTest {
             (receive(processor, wire(byteArrayOf(7, 8))) as ProcessorResult.Accepted).input.frame.close()
             assertEquals(1L, release.count)
             assertEquals(0L, slow.previewCopies)
-        } finally { release.countDown(); poll.join(3000) }
+        } finally { release.countDown(); poll.join(3000); slow.close() }
     }
 
     private fun processor(payload: ImagePayloadProfile = profile.payload) =
@@ -239,4 +335,29 @@ class PacketInspectorTest {
     private fun wire(payload: ByteArray, index: Int = 0, count: Int = 1, total: Int = payload.size, frameId: ULong = 42u): ByteArray =
         byteArrayOf(0xaa.toByte(), 1) + StructuredTransportCodec.encode(
             StructuredTransportHeader(1u, frameId, index, count, 345, payload.size, total.toLong()), payload) + byteArrayOf(13, 10)
+
+    private fun retainedStateWithoutCleanup(target: PacketInspector): Pair<Int, Int> {
+        fun field(name: String) = PacketInspector::class.java.getDeclaredField(name).also { it.isAccessible = true }.get(target)
+        return (field("lock") as ReentrantLock).withLock {
+            val retained = field("snapshot") as PacketInspectorSnapshot?
+            (field("leases") as Map<*, *>).size to
+                (retained?.let { it.raw.preview.size + (it.parsedFrame?.preview?.size ?: 0) } ?: 0)
+        }
+    }
+
+    private class ManualExpiryScheduler(private val clock: () -> Long) {
+        data class Pending(val at: Long, val action: () -> Unit)
+        val pending = mutableListOf<Pending>()
+        fun schedule(delayMillis: Long, action: () -> Unit): AutoCloseable {
+            val task = Pending(clock() + delayMillis, action)
+            pending += task
+            return AutoCloseable { pending.remove(task) }
+        }
+        fun runDue() {
+            while (true) {
+                val task = pending.filter { it.at <= clock() }.minByOrNull { it.at } ?: return
+                pending.remove(task); task.action()
+            }
+        }
+    }
 }

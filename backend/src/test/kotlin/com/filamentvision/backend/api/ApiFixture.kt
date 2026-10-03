@@ -90,7 +90,7 @@ internal class FakeBackend : BackendApplication {
             com.filamentvision.backend.input.transport.StructuredTransportHeader(1u, 42u, 0, 1, 100, 2, 2), byteArrayOf(1, 2)) + byteArrayOf(13, 10)
         return PacketInspectorSnapshot(7,
             RawDatagramInspection("127.0.0.1", 9000, 5000, 40, 10, RawParseStatus.VALID,
-                "AA 01", "0D 0A", true, true, wire, TransportInspection(1, 1, "42", 0, 1, 100, 2, 2)),
+                "AA 01", "0D 0A", 0xaa01, 0x0d0a, true, true, wire, TransportInspection(1, 1, "42", 0, 1, 100, 2, 2)),
             ParsedFrameInspection("GRAY8", "VALID", 2, 1, 2, 11, byteArrayOf(1, 2)))
     }
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView { record("createDraft", deviceId, commandId, cameraId, configuration); return DraftView("draft1", cameraId, 1, configuration) }

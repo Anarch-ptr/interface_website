@@ -11,7 +11,8 @@ data class TransportInspection(val protocolVersion: Int, val compatibilityStream
     val status: String = "VALID")
 data class RawDatagramInspection(val sourceIpv4: String, val sourcePort: Int, val backendListenPort: Int,
     val datagramSize: Int, val receivedAtMonotonicNanos: Long, val status: RawParseStatus,
-    val headerHex: String, val footerHex: String, val headerMatched: Boolean?, val footerMatched: Boolean?,
+    val expectedHeaderHex: String, val expectedFooterHex: String, val actualHeader: Int?, val actualFooter: Int?,
+    val headerMatched: Boolean?, val footerMatched: Boolean?,
     val preview: ByteArray, val transport: TransportInspection? = null)
 data class ParsedFrameInspection(val payloadFormat: String, val decodeResult: String,
     val width: Int?, val height: Int?, val completedFrameBytes: Int,

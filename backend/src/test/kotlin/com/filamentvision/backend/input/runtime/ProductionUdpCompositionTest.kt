@@ -131,5 +131,15 @@ class ProductionUdpCompositionTest {
         } finally { c.close() }
     }
 
+    @Test fun compositionCloseReleasesInspectorLeaseAndCannotReenableIt() = runBlocking {
+        val c = BackendComposition.open(path("inspector-close.db"), path("inspector-close-objects"))
+        val inspector = (c.inputSource as RaspberryPiUdpInputSource).packetInspector
+        inspector.createLease(64)
+        c.close(); c.close()
+        assertFalse(inspector.captureEnabled())
+        assertThrows(IllegalStateException::class.java) { inspector.createLease(64) }
+        Unit
+    }
+
     private fun path(name: String) = temporary.root.toPath().resolve(name)
 }
