@@ -38,9 +38,9 @@ interface BackendApplication {
     suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView
     suspend fun udpDiagnostics(deviceId: String): UdpDiagnosticsView
     suspend fun networkInterfaces(): NetworkInterfacesView
-    suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): PacketInspectorLease
-    suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String)
-    suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot
+    suspend fun createPacketInspectorLease(deviceId: String, previewBytes: Int): PacketInspectorLease
+    suspend fun releasePacketInspectorLease(deviceId: String, leaseId: String)
+    suspend fun packetInspectorSnapshot(deviceId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot
     suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView
     suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView
     suspend fun deleteDraft(deviceId: String, draftId: String, commandId: String): Unit

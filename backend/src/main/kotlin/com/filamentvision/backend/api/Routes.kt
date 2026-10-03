@@ -88,20 +88,20 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                 get("/udp-diagnostics") { api(correlationId) { correlation ->
                     reply(correlation, backend.udpDiagnostics(id("deviceId")).toDto())
                 } }
-                post("/cameras/{cameraId}/packet-inspector/lease") { api(correlationId) { correlation ->
+                post("/packet-inspector/lease") { api(correlationId) { correlation ->
                     val request = body<CreatePacketInspectorLeaseRequest>()
                     valid(request.previewBytes in com.filamentvision.backend.input.inspector.PacketInspector.ALLOWED_PREVIEW_BYTES)
-                    reply(correlation, backend.createPacketInspectorLease(id("deviceId"), id("cameraId"), request.previewBytes).toDto(), HttpStatusCode.Created)
+                    reply(correlation, backend.createPacketInspectorLease(id("deviceId"), request.previewBytes).toDto(), HttpStatusCode.Created)
                 } }
-                delete("/cameras/{cameraId}/packet-inspector/lease/{leaseId}") { api(correlationId) { correlation ->
-                    backend.releasePacketInspectorLease(id("deviceId"), id("cameraId"), id("leaseId"))
+                delete("/packet-inspector/lease/{leaseId}") { api(correlationId) { correlation ->
+                    backend.releasePacketInspectorLease(id("deviceId"), id("leaseId"))
                     reply(correlation, DeletedDto())
                 } }
-                get("/cameras/{cameraId}/packet-inspector") { api(correlationId) { correlation ->
+                get("/packet-inspector") { api(correlationId) { correlation ->
                     val leaseId = query("leaseId").orEmpty().also { valid(it.isNotBlank()) }
                     val previewBytes = query("previewBytes")?.toIntOrNull() ?: throw ApplicationFailure(ApplicationFailureCode.INVALID)
                     valid(previewBytes in com.filamentvision.backend.input.inspector.PacketInspector.ALLOWED_PREVIEW_BYTES)
-                    val snapshot = backend.packetInspectorSnapshot(id("deviceId"), id("cameraId"), leaseId, previewBytes)
+                    val snapshot = backend.packetInspectorSnapshot(id("deviceId"), leaseId, previewBytes)
                     val etag = "\"${snapshot.sequence}\""
                     call.response.header(HttpHeaders.ETag, etag)
                     if (call.request.headers[HttpHeaders.IfNoneMatch] == etag) call.respond(HttpStatusCode.NotModified)

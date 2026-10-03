@@ -1,6 +1,8 @@
 package com.filamentvision.backend.input.runtime
 
 import com.filamentvision.backend.input.diagnostics.UdpDiagnostics
+import com.filamentvision.backend.input.inspector.PacketInspector
+import com.filamentvision.backend.input.inspector.RawParseStatus
 import com.filamentvision.backend.input.network.BackendIpv4Resolver
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.reassembly.StructuredReassemblyObserver
@@ -27,6 +29,7 @@ class RaspberryPiUdpInputSource(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val compiledFactory: (RaspberryPiUdpInputProfile, StructuredReassemblyObserver) -> CompiledRaspberryPiInputProfile =
         CompiledRaspberryPiInputProfile::compile,
+    val packetInspector: PacketInspector = PacketInspector(),
 ) : CameraInputSource {
     init { require(RaspberryPiUdpInputProfileValidator().validate(profile).isValid) { "Invalid Raspberry Pi UDP input profile" } }
 
@@ -92,7 +95,7 @@ class RaspberryPiUdpInputSource(
         try {
             if (profile.enabled) {
                 processingLock.withLock {
-                    processor = RaspberryPiUdpProcessor(compiledFactory(profile, reassemblyObserver()), decodedPermit)
+                    processor = RaspberryPiUdpProcessor(compiledFactory(profile, reassemblyObserver()), decodedPermit, packetInspector)
                 }
                 synchronized(mailboxLock) { admitting = true }
                 // Refresh the selected address immediately before constructing/opening the receiver.
@@ -173,7 +176,7 @@ class RaspberryPiUdpInputSource(
         val compiled = compiledFactory(candidate, reassemblyObserver())
         val next = compiled.profile
         val bindIpv4 = resolveBind(next)
-        val preparedProcessor = RaspberryPiUdpProcessor(compiled, decodedPermit)
+        val preparedProcessor = RaspberryPiUdpProcessor(compiled, decodedPermit, packetInspector)
         currentCoroutineContext().ensureActive()
         withContext(NonCancellable) {
             processingLock.withLock {
@@ -288,10 +291,12 @@ class RaspberryPiUdpInputSource(
             override fun onReceived(datagram: ReceivedDatagram) = udp.datagramReceived(datagram.size, datagram.metadata())
             override fun onSourceFiltered(datagram: ReceivedDatagram) {
                 udp.sourceFiltered(); activity.rejected(datagram.receivedAtMonotonicNanos)
+                inspectRejected(datagram, RawParseStatus.SOURCE_IP_MISMATCH)
             }
             override fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) {
                 activity.accepted(datagram.receivedAtMonotonicNanos)
                 udp.datagramTooLargeOrTruncated()
+                inspectRejected(datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
             }
             override fun onFailure(error: Throwable) {
                 synchronized(receiverStatusLock) {
@@ -308,6 +313,7 @@ class RaspberryPiUdpInputSource(
                 // A datagram may have passed the receiver guard immediately before a limit swap.
                 if (datagram.size > receiveCapacity(profile).acceptedLimit) {
                     udp.datagramTooLargeOrTruncated()
+                    inspectRejected(datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
                     return@withLock
                 }
                 when (val result = checkNotNull(processor).process(datagram.bytes, datagram.metadata())) {
@@ -316,6 +322,12 @@ class RaspberryPiUdpInputSource(
                     ProcessorResult.Pending -> Unit
                 }
             }
+        }
+    }
+
+    private fun inspectRejected(datagram: ReceivedDatagram, status: RawParseStatus) {
+        if (packetInspector.captureEnabled()) datagram.bytes.withBytes { bytes, length ->
+            packetInspector.captureRaw(bytes, length, datagram.metadata(), profile, status)
         }
     }
 

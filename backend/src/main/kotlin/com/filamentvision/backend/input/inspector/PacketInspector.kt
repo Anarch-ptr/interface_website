@@ -1,102 +1,140 @@
 package com.filamentvision.backend.input.inspector
 
-import com.filamentvision.backend.input.profile.UdpCameraId
-import java.net.InetSocketAddress
+import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata
+import com.filamentvision.backend.input.transport.StructuredTransportHeader
 import java.util.UUID
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
-/** Lease-controlled, latest-only diagnostic tap. Processing never reads this state. */
+/** Optional latest-only observer. Producer taps never wait for a lease/polling lock. */
 class PacketInspector(
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val leaseDurationMillis: Long = 30_000,
 ) {
+    private val lock = ReentrantLock()
     private val leases = linkedMapOf<String, PacketInspectorLease>()
-    private val snapshots = mutableMapOf<UdpCameraId, PacketInspectorSnapshot>()
+    private var snapshot: PacketInspectorSnapshot? = null
     private var sequence = 0L
-    var previewCopies: Long = 0
+    private var rawCaptureId = 0L
+    @Volatile private var enabled = false
+    @Volatile var previewCopies: Long = 0
         private set
 
-    @Synchronized fun createLease(cameraId: UdpCameraId, previewBytes: Int): PacketInspectorLease {
+    fun createLease(previewBytes: Int): PacketInspectorLease = lock.withLock {
         require(previewBytes in ALLOWED_PREVIEW_BYTES)
         expire()
-        return PacketInspectorLease(UUID.randomUUID().toString(), cameraId, previewBytes,
-            Math.addExact(clockMillis(), leaseDurationMillis)).also { leases[it.id] = it }
+        PacketInspectorLease(UUID.randomUUID().toString(), previewBytes,
+            Math.addExact(clockMillis(), leaseDurationMillis)).also { leases[it.id] = it; enabled = true }
     }
 
-    @Synchronized fun releaseLease(id: String, cameraId: UdpCameraId): Boolean {
+    fun releaseLease(id: String): Boolean = lock.withLock {
         expire()
-        val lease = leases[id]?.takeIf { it.cameraId == cameraId } ?: return false
-        leases.remove(lease.id)
-        discardIfInactive(cameraId)
-        return true
+        val removed = leases.remove(id) != null
+        discardIfInactive()
+        removed
     }
 
-    @Synchronized fun captureEnabled(cameraId: UdpCameraId): Boolean {
-        expire(); return leases.values.any { it.cameraId == cameraId }
-    }
+    fun captureEnabled(): Boolean = observe(false) { true }
 
-    @Synchronized fun captureRaw(cameraId: UdpCameraId, bytes: ByteArray, length: Int,
-        source: InetSocketAddress, receivedAtMonotonicNanos: Long, status: RawParseStatus,
-        transport: TransportInspection? = null): Boolean {
+    /** Return a token so a skipped/newer capture cannot acquire this Datagram's later metadata. */
+    fun captureRaw(bytes: ByteArray, length: Int, metadata: ReceivedDatagramMetadata,
+        profile: RaspberryPiUdpInputProfile, status: RawParseStatus): Long = observe(0L) {
         require(length in 0..bytes.size)
-        val limit = activePreviewLimit(cameraId) ?: return false
-        val preview = bytes.copyOfRange(0, minOf(length, limit, HARD_MAX_PREVIEW_BYTES))
+        val limit = previewLimit()
+        val header = normalizeTwoByteHex(profile.envelope.headerHex)
+        val footer = normalizeTwoByteHex(profile.envelope.footerHex)
+        // Source rejects never enter envelope validation, even for Inspector.
+        val checkEnvelope = status != RawParseStatus.SOURCE_IP_MISMATCH && status != RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED
+        val raw = RawDatagramInspection(metadata.source.address.hostAddress, metadata.source.port, profile.listenPort,
+            length, metadata.receivedAtMonotonicNanos, status, header, footer,
+            if (checkEnvelope) matches(bytes, length, 0, header) else null,
+            if (checkEnvelope) matches(bytes, length, length - 2, footer) else null,
+            bytes.copyOfRange(0, minOf(length, limit)))
         previewCopies++
-        snapshots[cameraId] = PacketInspectorSnapshot(++sequence, cameraId,
-            RawDatagramInspection(source.address.hostAddress, source.port, length, receivedAtMonotonicNanos,
-                status, preview, transport), null)
-        return true
+        rawCaptureId = ++sequence
+        snapshot = PacketInspectorSnapshot(sequence, raw, null)
+        rawCaptureId
     }
 
-    @Synchronized fun captureParsed(cameraId: UdpCameraId, bytes: ByteArray, payloadFormat: String,
-        decodeResult: String, applicationHeaderBytes: Int, applicationFooterBytes: Int,
-        receivedAtMonotonicNanos: Long): Boolean {
-        val limit = activePreviewLimit(cameraId) ?: return false
-        val prior = snapshots[cameraId] ?: return false
-        val preview = bytes.copyOfRange(0, minOf(bytes.size, limit, HARD_MAX_PREVIEW_BYTES))
+    fun attachTransport(captureId: Long, header: StructuredTransportHeader): Boolean = observe(false) {
+        val prior = current(captureId) ?: return@observe false
+        val transport = TransportInspection(header.protocolVersion, header.compatibilityStreamId.toInt(),
+            header.frameId.toString(), header.chunkIndex, header.chunkCount, header.sourceTimestampMicros,
+            header.payloadLength, header.framePayloadBytes)
+        snapshot = prior.copy(sequence = ++sequence, raw = prior.raw.copy(transport = transport))
+        true
+    }
+
+    fun rejectTransport(captureId: Long): Boolean = observe(false) {
+        val prior = current(captureId) ?: return@observe false
+        snapshot = prior.copy(sequence = ++sequence, raw = prior.raw.copy(status = RawParseStatus.INVALID_TRANSPORT_HEADER))
+        true
+    }
+
+    fun captureParsed(captureId: Long, bytes: ByteArray, payload: ImagePayloadProfile,
+        decodeResult: String, width: Int?, height: Int?, receivedAtMonotonicNanos: Long): Boolean = observe(false) {
+        val prior = current(captureId) ?: return@observe false
+        val limit = minOf(previewLimit(), HARD_MAX_PREVIEW_BYTES - prior.raw.preview.size)
+        val preview = bytes.copyOfRange(0, minOf(bytes.size, limit))
         previewCopies++
-        snapshots[cameraId] = prior.copy(sequence = ++sequence, parsedFrame = ParsedFrameInspection(payloadFormat,
-            decodeResult, applicationHeaderBytes, applicationFooterBytes, receivedAtMonotonicNanos, preview))
-        return true
+        val (format, dimensions) = when (payload) {
+            is ImagePayloadProfile.Jpeg -> "JPEG" to (payload.expectedWidth to payload.expectedHeight)
+            is ImagePayloadProfile.Gray8 -> "GRAY8" to (payload.width to payload.height)
+            is ImagePayloadProfile.Binary -> "BINARY" to (payload.width to payload.height)
+            is ImagePayloadProfile.Rgb888 -> "RGB888" to (payload.width to payload.height)
+        }
+        snapshot = prior.copy(sequence = ++sequence, parsedFrame = ParsedFrameInspection(format, decodeResult,
+            width ?: dimensions.first, height ?: dimensions.second, bytes.size, receivedAtMonotonicNanos, preview))
+        true
     }
 
-    @Synchronized fun attachTransport(cameraId: UdpCameraId, transport: TransportInspection): Boolean {
-        activePreviewLimit(cameraId) ?: return false
-        val prior = snapshots[cameraId] ?: return false
-        snapshots[cameraId] = prior.copy(sequence = ++sequence, raw = prior.raw.copy(transport = transport))
-        return true
-    }
-
-    @Synchronized fun latest(leaseId: String, cameraId: UdpCameraId, previewBytes: Int? = null): PacketInspectorSnapshot? {
+    fun latest(leaseId: String, previewBytes: Int? = null): PacketInspectorSnapshot? = lock.withLock {
         expire()
-        val lease = leases[leaseId]?.takeIf { it.cameraId == cameraId } ?: return null
         previewBytes?.let { require(it in ALLOWED_PREVIEW_BYTES) }
-        return snapshots[cameraId]?.bounded(minOf(lease.previewBytes, previewBytes ?: lease.previewBytes))
+        val lease = leases[leaseId] ?: return null
+        val limit = minOf(lease.previewBytes, previewBytes ?: lease.previewBytes)
+        snapshot?.let { prior -> prior.copy(
+            raw = prior.raw.copy(preview = prior.raw.preview.copyOf(minOf(prior.raw.preview.size, limit))),
+            parsedFrame = prior.parsedFrame?.let { it.copy(preview = it.preview.copyOf(minOf(it.preview.size, limit))) },
+        ) }
     }
 
-    @get:Synchronized val retainedSnapshotCount: Int get() { expire(); return snapshots.size }
-    @get:Synchronized val retainedPreviewBytes: Int get() { expire(); return snapshots.values.sumOf {
-        it.raw.preview.size + (it.parsedFrame?.preview?.size ?: 0)
-    } }
-
-    private fun PacketInspectorSnapshot.bounded(limit: Int) = copy(
-        raw = raw.copy(preview = raw.preview.copyOf(minOf(raw.preview.size, limit))),
-        parsedFrame = parsedFrame?.copy(preview = parsedFrame.preview.copyOf(minOf(parsedFrame.preview.size, limit))),
-    )
-    private fun activePreviewLimit(cameraId: UdpCameraId): Int? {
-        expire()
-        return leases.values.filter { it.cameraId == cameraId }.maxOfOrNull { it.previewBytes }
+    val retainedSnapshotCount: Int get() = lock.withLock { expire(); if (snapshot == null) 0 else 1 }
+    val retainedPreviewBytes: Int get() = lock.withLock {
+        expire(); snapshot?.let { it.raw.preview.size + (it.parsedFrame?.preview?.size ?: 0) } ?: 0
     }
+
+    private fun current(captureId: Long) = snapshot.takeIf { captureId != 0L && captureId == rawCaptureId }
+    private fun previewLimit() = minOf(leases.values.maxOf { it.previewBytes }, HARD_MAX_PREVIEW_BYTES / 2)
     private fun expire() {
+        if (!enabled) return
         val now = clockMillis()
-        val cameras = leases.values.filter { it.expiresAtMillis <= now }.map { it.cameraId }.toSet()
         leases.entries.removeIf { it.value.expiresAtMillis <= now }
-        cameras.forEach(::discardIfInactive)
+        discardIfInactive()
     }
-    private fun discardIfInactive(cameraId: UdpCameraId) {
-        if (leases.values.none { it.cameraId == cameraId }) snapshots.remove(cameraId)
+    private fun discardIfInactive() {
+        enabled = leases.isNotEmpty()
+        if (!enabled) { snapshot = null; rawCaptureId = 0 }
     }
+    private inline fun <T> observe(skipped: T, block: () -> T): T {
+        if (!enabled || !lock.tryLock()) return skipped
+        return try {
+            expire()
+            if (enabled) block() else skipped
+        } catch (_: Exception) {
+            // Diagnostic failures cannot fail or backpressure the processing/reliable path.
+            skipped
+        } finally { lock.unlock() }
+    }
+    private fun matches(bytes: ByteArray, length: Int, offset: Int, hex: String): Boolean =
+        offset >= 0 && offset + 2 <= length &&
+            (bytes[offset].toInt() and 0xff) == hex.substring(0, 2).toInt(16) &&
+            (bytes[offset + 1].toInt() and 0xff) == hex.substring(3, 5).toInt(16)
+
     companion object {
+        /** Aggregate unique owned raw + completed-frame preview bytes. Transport owns no bytes. */
         const val HARD_MAX_PREVIEW_BYTES = 512
-        val ALLOWED_PREVIEW_BYTES = setOf(64, 128, 256, 512)
+        val ALLOWED_PREVIEW_BYTES = setOf(64, 128, 256)
     }
 }

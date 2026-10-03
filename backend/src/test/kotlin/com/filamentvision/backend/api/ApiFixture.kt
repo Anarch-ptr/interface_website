@@ -75,22 +75,23 @@ internal class FakeBackend : BackendApplication {
     }
     override suspend fun networkInterfaces(): NetworkInterfacesView = NetworkInterfacesView(emptyList(), NetworkInterfaceSelection.Auto,
         BackendIpv4Resolution(null, false, "NO_USABLE_IPV4_INTERFACE"), 5000)
-    override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): PacketInspectorLease {
-        record("createPacketInspectorLease", deviceId, cameraId, previewBytes)
-        if (cameraId !in setOf("A", "B")) throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
-        return PacketInspectorLease("lease-$cameraId", UdpCameraId.valueOf(cameraId), previewBytes, 9999)
+    override suspend fun createPacketInspectorLease(deviceId: String, previewBytes: Int): PacketInspectorLease {
+        record("createPacketInspectorLease", deviceId, previewBytes)
+        return PacketInspectorLease("lease", previewBytes, 9999)
     }
-    override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String) {
-        record("releasePacketInspectorLease", deviceId, cameraId, leaseId)
-        if (cameraId != "A" || leaseId != "lease-A") throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
+    override suspend fun releasePacketInspectorLease(deviceId: String, leaseId: String) {
+        record("releasePacketInspectorLease", deviceId, leaseId)
+        if (leaseId != "lease") throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
     }
-    override suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot {
-        record("packetInspectorSnapshot", deviceId, cameraId, leaseId, previewBytes)
-        if (!inspectorAvailable || cameraId != "A") throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
-        return PacketInspectorSnapshot(7, UdpCameraId.A,
-            RawDatagramInspection("127.0.0.1", 9000, 3, 10, RawParseStatus.SOURCE_IP_MISMATCH,
-                byteArrayOf(0xAA.toByte(), 0x0F, 0xFF.toByte()), TransportInspection(42, 1, 3, 100, 3, 9)),
-            ParsedFrameInspection("GRAY8", "VALID", 2, 1, 11, byteArrayOf(1, 2)))
+    override suspend fun packetInspectorSnapshot(deviceId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot {
+        record("packetInspectorSnapshot", deviceId, leaseId, previewBytes)
+        if (!inspectorAvailable || leaseId != "lease") throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
+        val wire = byteArrayOf(0xaa.toByte(), 1) + com.filamentvision.backend.input.transport.StructuredTransportCodec.encode(
+            com.filamentvision.backend.input.transport.StructuredTransportHeader(1u, 42u, 0, 1, 100, 2, 2), byteArrayOf(1, 2)) + byteArrayOf(13, 10)
+        return PacketInspectorSnapshot(7,
+            RawDatagramInspection("127.0.0.1", 9000, 5000, 40, 10, RawParseStatus.VALID,
+                "AA 01", "0D 0A", true, true, wire, TransportInspection(1, 1, "42", 0, 1, 100, 2, 2)),
+            ParsedFrameInspection("GRAY8", "VALID", 2, 1, 2, 11, byteArrayOf(1, 2)))
     }
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView { record("createDraft", deviceId, commandId, cameraId, configuration); return DraftView("draft1", cameraId, 1, configuration) }
     override suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView { record("updateDraft", deviceId, draftId, commandId, expectedRevision, configuration); return DraftView(draftId, "A", 2, configuration) }

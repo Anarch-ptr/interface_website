@@ -113,19 +113,20 @@ class ProductionUdpCompositionTest {
         } finally { reopened.close() }
     }
 
-    @Test fun oldInspectorContractsFailClosedUntilTheirApiMigration() = runBlocking {
+    @Test fun inspectorLeaseDoesNotStartAProducerOrChangeConfiguration() = runBlocking {
         val c = BackendComposition.open(path("legacy-api.db"), path("legacy-api-objects"))
         try {
             val before = c.udpProfileRepository.state()
-            val calls: List<suspend () -> Any?> = listOf(
-                { c.application.createPacketInspectorLease(c.deviceId, "A", 64) },
-                { c.application.releasePacketInspectorLease(c.deviceId, "A", "lease") },
-                { c.application.packetInspectorSnapshot(c.deviceId, "A", "lease", 64) },
-            )
-            for (call in calls) {
-                val failure = assertThrows(ApplicationFailure::class.java) { runBlocking { call() } }
-                assertEquals(ApplicationFailureCode.UNAVAILABLE, failure.code)
-            }
+            val lease = c.application.createPacketInspectorLease(c.deviceId, 64)
+            val failure = assertThrows(ApplicationFailure::class.java) { runBlocking {
+                c.application.packetInspectorSnapshot(c.deviceId, lease.id, 64)
+            } }
+            assertEquals(ApplicationFailureCode.NOT_FOUND, failure.code)
+            c.application.releasePacketInspectorLease(c.deviceId, lease.id)
+            val source = c.inputSource as RaspberryPiUdpInputSource
+            assertEquals(0, source.activeProducerCount)
+            assertEquals(0, source.activeReceiverCount)
+            assertEquals(0L, source.totalProducerStarts)
             assertEquals(before, c.udpProfileRepository.state())
         } finally { c.close() }
     }

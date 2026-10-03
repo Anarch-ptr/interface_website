@@ -156,16 +156,21 @@ internal class ComposedBackendApplication(private val c: BackendComposition,
             NetworkInterfacesView(eligible, profile.networkInterface, resolution, profile.listenPort)
         }
     }
-    // Packet Inspector retains its historical signatures until Task 19.
     private fun unavailableUdp(deviceId: String): Nothing {
         device(deviceId)
         throw ApplicationFailure(ApplicationFailureCode.UNAVAILABLE)
     }
-    override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): com.filamentvision.backend.input.inspector.PacketInspectorLease =
-        unavailableUdp(deviceId)
-    override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String): Unit = unavailableUdp(deviceId)
-    override suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): com.filamentvision.backend.input.inspector.PacketInspectorSnapshot =
-        unavailableUdp(deviceId)
+    private fun inspector(deviceId: String): com.filamentvision.backend.input.inspector.PacketInspector {
+        device(deviceId)
+        return (c.inputSource as? RaspberryPiUdpInputSource)?.packetInspector ?: unavailableUdp(deviceId)
+    }
+    override suspend fun createPacketInspectorLease(deviceId: String, previewBytes: Int) =
+        inspector(deviceId).createLease(previewBytes)
+    override suspend fun releasePacketInspectorLease(deviceId: String, leaseId: String) {
+        if (!inspector(deviceId).releaseLease(leaseId)) missing()
+    }
+    override suspend fun packetInspectorSnapshot(deviceId: String, leaseId: String, previewBytes: Int) =
+        inspector(deviceId).latest(leaseId, previewBytes) ?: missing()
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView {
         device(deviceId); if (cameraId != c.camera.value) missing()
         return dedup("createDraft", commandId) {
