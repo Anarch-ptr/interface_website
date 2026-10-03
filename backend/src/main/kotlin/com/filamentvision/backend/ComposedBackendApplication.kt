@@ -147,7 +147,7 @@ internal class ComposedBackendApplication(private val c: BackendComposition,
         }
     }
     override suspend fun networkInterfaces(): NetworkInterfacesView = c.commands.withLock {
-        val profile = c.io { c.udpProfileRepository.state().saved.profile }
+        val profile = c.io { c.udpProfileRepository.state().applied.profile }
         c.io {
             // Resolve and enumerate against the same inventory snapshot; never expose wildcard binding.
             val eligible = interfaces.listEligible().filter { it.isEligible() }
