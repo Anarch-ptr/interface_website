@@ -115,7 +115,15 @@ export function backendAlarms(values: readonly unknown[]): BackendAlarmTransitio
   return values.filter((value): value is BackendAlarmTransition => isRecord(value) &&
     typeof value.id === 'string' && typeof value.sessionId === 'string' && finite(value.timestamp) &&
     (value.diameterMm === null || finite(value.diameterMm)) && alarmState(value.from) && alarmState(value.to))
-    .reverse().sort((left, right) => right.timestamp - left.timestamp)
+    .sort((left, right) => compareBackendAlarmOrder(right, left))
+}
+
+export function compareBackendAlarmOrder(left: unknown, right: unknown): number {
+  const leftTime = isRecord(left) && finite(left.timestamp) ? left.timestamp : 0
+  const rightTime = isRecord(right) && finite(right.timestamp) ? right.timestamp : 0
+  const leftId = isRecord(left) && typeof left.id === 'string' ? left.id : ''
+  const rightId = isRecord(right) && typeof right.id === 'string' ? right.id : ''
+  return leftTime - rightTime || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0)
 }
 
 export function backendErrors(values: readonly unknown[]): BackendErrorRecord[] {

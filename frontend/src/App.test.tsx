@@ -119,6 +119,53 @@ function emitDiameter(
 }
 
 describe('FilamentVision application', () => {
+  it.each(['live', 'recovered'] as const)(
+    'keeps authoritative tied alarm order after an overlapping page follows a %s alarm', async kind => {
+      const user = userEvent.setup()
+      const { source, runtime, view } = createFixture()
+      const normal = { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 }
+      const warning = { level: 'WARNING', direction: 'HIGH', deviationPercent: 1.14 }
+      const first = { id: 'session-1-alarm-000000000001', sessionId: 'session-1', timestamp: 1000,
+        diameterMm: 1.77, from: normal, to: warning }
+      const second = { id: 'session-1-alarm-000000000002', sessionId: 'session-1', timestamp: 1000,
+        diameterMm: 1.75, from: warning, to: normal }
+      try {
+        act(() => {
+          source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
+            session: { id: 'session-1' }, latestMeasurement: measurement(1.75, 1000), alarm: normal })
+          if (kind === 'live') source.event({ type: 'alarm.transition', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 1000, payload: second })
+          else source.recover({ sequence: 4, complete: false, sessions: [], errors: [], measurements: [], alarms: [second] })
+          source.recover({ sequence: 5, complete: true, sessions: [], errors: [], measurements: [], alarms: [first, second] })
+        })
+        expect.soft(screen.queryByText(/Recovered ·/)).toBeVisible()
+        expect.soft(screen.queryByText(/Latest transition: WARNING/)).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'Alarm History' }))
+        expect(within(screen.getAllByRole('listitem')[0]).getByText('Recovered')).toBeVisible()
+        expect(screen.queryByText('Active')).not.toBeInTheDocument()
+      } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+    },
+  )
+
+  it('retains the highest tied alarm ordinal when an overlapping page exceeds 300 records', async () => {
+    const { source, store, runtime, view } = createFixture()
+    const alarm = (index: number) => ({ id: `session-1-alarm-${index.toString().padStart(12, '0')}`,
+      sessionId: 'session-1', timestamp: 1000, diameterMm: 1.77,
+      from: { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 },
+      to: { level: 'WARNING', direction: 'HIGH', deviationPercent: 1.14 } })
+    try {
+      act(() => {
+        source.recover({ sequence: 4, complete: false, sessions: [], errors: [], measurements: [], alarms: [alarm(401)] })
+        source.recover({ sequence: 4, complete: true, sessions: [], errors: [], measurements: [],
+          alarms: Array.from({ length: 401 }, (_, index) => alarm(index + 1)) })
+      })
+      const records = store.getLiveSnapshot().recoveredAlarms as { id: string }[]
+      expect(records).toHaveLength(300)
+      expect(records.at(-1)?.id).toBe('session-1-alarm-000000000401')
+      expect(records[0]?.id).toBe('session-1-alarm-000000000102')
+      expect(new Set(records.map(value => value.id)).size).toBe(300)
+    } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+  })
+
   it('clears current values across two sessions while retaining history without a NORMAL transition', async () => {
     const { source, store, runtime, view } = createFixture()
     const alarm = { id: 'old-alarm', sessionId: 'session-1', timestamp: 1000, diameterMm: 1.78,
@@ -408,7 +455,7 @@ describe('FilamentVision application', () => {
     view.unmount(); await act(async () => Promise.resolve()); runtime.dispose()
   })
 
-  it('orders alarm transitions sharing a timestamp by arrival and does not revive recovered episodes', async () => {
+  it('orders alarm transitions sharing a timestamp by Backend ordinal and does not revive recovered episodes', async () => {
     const user = userEvent.setup()
     const { source, runtime, view } = createFixture()
     const normal = { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 }
@@ -417,9 +464,9 @@ describe('FilamentVision application', () => {
       source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
         session: { id: 'session-1' }, latestMeasurement: measurement(1.75, 1000), alarm: normal })
       source.event({ type: 'alarm.transition', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 1000,
-        payload: { id: 'warning', sessionId: 'session-1', timestamp: 1000, diameterMm: 1.77, from: normal, to: warning } })
+        payload: { id: 'session-1-alarm-000000000001', sessionId: 'session-1', timestamp: 1000, diameterMm: 1.77, from: normal, to: warning } })
       source.event({ type: 'alarm.transition', sequence: 6, deviceId: 'filamentvision-1', occurredAt: 1000,
-        payload: { id: 'recovery', sessionId: 'session-1', timestamp: 1000, diameterMm: 1.75, from: warning, to: normal } })
+        payload: { id: 'session-1-alarm-000000000002', sessionId: 'session-1', timestamp: 1000, diameterMm: 1.75, from: warning, to: normal } })
     })
     expect(screen.getByText(/Recovered ·/)).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Alarm History' }))

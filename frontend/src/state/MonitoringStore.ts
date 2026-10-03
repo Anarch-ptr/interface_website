@@ -16,6 +16,7 @@ import {
   type BackendRecovery, type BackendState, type CameraPreview,
   type BackendSession,
   backendAlarms,
+  compareBackendAlarmOrder,
 } from '../domain/monitoring'
 import type { FilamentDataSource, Unsubscribe } from '../services/FilamentDataSource'
 
@@ -423,13 +424,8 @@ function mergeRecords<T>(current: readonly T[], incoming: readonly T[], chronolo
     records.set(id, value)
   }
   const ordered = [...records.values()]
-  if (chronological) ordered.sort((left, right) => recordTimestamp(left) - recordTimestamp(right))
+  if (chronological) ordered.sort(compareBackendAlarmOrder)
   return Object.freeze(ordered.slice(-300))
-}
-
-function recordTimestamp(value: unknown): number {
-  return value && typeof value === 'object' && 'timestamp' in value && typeof value.timestamp === 'number'
-    ? value.timestamp : 0
 }
 
 function isDiameterAlarmStatus(
