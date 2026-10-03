@@ -37,9 +37,17 @@ export function PacketInspector({ api, deviceId }: { api: BackendApiClient; devi
       } catch (reason) {
         if (abort.signal.aborted) return
         if (reason instanceof BackendApiError && reason.status === 404) {
-          current = null
-          try { if (!await acquire()) return }
-          catch { if (!abort.signal.aborted) setError('Unable to renew Inspector lease. Close and reopen to retry.'); return }
+          if (current.expiresAtMillis > Date.now()) {
+            // Backend also returns 404 for a valid lease that has no captured Datagram yet.
+            setError(''); latest.current = null
+            if (!frozenRef.current) setDisplay(null)
+          } else {
+            const expired = current; current = null
+            await release(expired)
+            if (abort.signal.aborted) return
+            try { if (!await acquire()) return }
+            catch { if (!abort.signal.aborted) setError('Unable to renew Inspector lease. Close and reopen to retry.'); return }
+          }
         } else setError('Inspector polling failed. Retrying…')
       }
       if (!abort.signal.aborted) timer = window.setTimeout(() => void poll(), 500)

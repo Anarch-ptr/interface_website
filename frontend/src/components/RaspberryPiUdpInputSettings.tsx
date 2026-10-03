@@ -19,15 +19,17 @@ export function RaspberryPiUdpInputSettings({ api, deviceId = 'filamentvision-1'
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const lifecycle = useRef<AbortController | null>(null)
+  const loadGeneration = useRef(0)
 
   useEffect(() => {
     const abort = new AbortController(); lifecycle.current = abort
+    const generation = ++loadGeneration.current
     let timer = 0
     void Promise.all([api.getRaspberryPiUdpConfiguration(deviceId, abort.signal), api.getNetworkInterfaces(abort.signal)])
       .then(([configuration, network]) => {
-        if (abort.signal.aborted) return
+        if (abort.signal.aborted || generation !== loadGeneration.current) return
         setState(configuration); setDraft(configuration.configuration); setInterfaces(network)
-      }).catch(() => { if (!abort.signal.aborted) setMessage('Unable to load expected-input settings. Reload to retry.') })
+      }).catch(() => { if (!abort.signal.aborted && generation === loadGeneration.current) setMessage('Unable to load expected-input settings. Reload to retry.') })
     async function poll() {
       try {
         const value = await api.getRaspberryPiUdpDiagnostics(deviceId, abort.signal)
@@ -49,6 +51,7 @@ export function RaspberryPiUdpInputSettings({ api, deviceId = 'filamentvision-1'
   async function operation(kind: 'save' | 'apply' | 'reload') {
     const abort = lifecycle.current
     if (busy || !abort || abort.signal.aborted) return
+    if (kind === 'reload') ++loadGeneration.current
     setBusy(true); setServerErrors([]); setMessage('')
     try {
       let next: UdpConfigurationState

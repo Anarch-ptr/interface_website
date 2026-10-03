@@ -49,6 +49,28 @@ describe('single Packet Inspector', () => {
     fetch.mockResolvedValueOnce(apiResponse({ leaseId: 'expired', previewBytes: 128, expiresAtMillis: 9 })).mockResolvedValueOnce(new Response(JSON.stringify({ code: 'NOT_FOUND', message: 'expired', correlationId: 'c' }), { status: 404 }))
     await user.click(screen.getByRole('button', { name: 'Inspect Packet' })); await screen.findByText('AB 01'); await user.click(screen.getByRole('button', { name: 'Copy Hex' })); expect(writeText).toHaveBeenCalledWith('AB 01')
     await user.click(screen.getByRole('button', { name: 'Copy Debug Info' })); expect(writeText.mock.calls[1][0]).toContain('HEADER_MISMATCH')
+    expect(fetch.mock.calls.filter(([, options]) => options?.method === 'POST' || options?.method === 'DELETE').map(([url, options]) => [url, options?.method])).toEqual([
+      ['/api/v1/devices/pi/packet-inspector/lease', 'POST'],
+      ['/api/v1/devices/pi/packet-inspector/lease/expired', 'DELETE'],
+      ['/api/v1/devices/pi/packet-inspector/lease', 'POST'],
+    ])
+  })
+  it('retains a valid lease across repeated 404s before the first Datagram and releases it once on close', async () => {
+    const { api, fetch } = fixture(); const user = userEvent.setup()
+    fetch.mockImplementation(async (_url: string, options?: RequestInit) => {
+      if (options?.method === 'POST') return apiResponse({ leaseId: 'waiting', previewBytes: 128, expiresAtMillis: Date.now() + 60000 })
+      if (options?.method === 'DELETE') return apiResponse({ deleted: true })
+      return new Response(JSON.stringify({ code: 'NOT_FOUND', message: 'no snapshot', correlationId: 'c' }), { status: 404 })
+    })
+    render(<PacketInspector api={api} deviceId="pi" />); await user.click(screen.getByRole('button', { name: 'Inspect Packet' }))
+    await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('?leaseId=')).length).toBeGreaterThanOrEqual(3), { timeout: 1800 })
+    expect(screen.getByText('Waiting for UDP Datagram…')).toBeVisible()
+    expect(fetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1)
+    expect(fetch.mock.calls.filter(([, options]) => options?.method === 'DELETE')).toHaveLength(0)
+    expect(fetch.mock.calls.filter(([url]) => url.includes('?leaseId=')).every(([url]) => url.includes('leaseId=waiting'))).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Close Inspector' }))
+    await waitFor(() => expect(fetch.mock.calls.filter(([, options]) => options?.method === 'DELETE')).toHaveLength(1))
+    expect(fetch.mock.calls.find(([, options]) => options?.method === 'DELETE')![0]).toBe('/api/v1/devices/pi/packet-inspector/lease/waiting')
   })
   it('shows complete structured and parsed image metadata without rounding a uint64 frame id', async () => {
     const { api, fetch } = fixture(); const user = userEvent.setup()

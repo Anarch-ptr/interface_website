@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BackendApiClient } from '../services/BackendApiClient'
@@ -114,5 +114,25 @@ describe('Raspberry Pi expected-input settings', () => {
     const { api, fetch } = fixture(); const user = userEvent.setup(); fetch.mockRejectedValueOnce(new Error('offline'))
     render(<RaspberryPiUdpInputSettings api={api} />); expect(await screen.findByText(/Unable to load expected-input settings/)).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Reload expected input' })); await waitFor(() => expect(screen.getByLabelText('Payload Format')).toHaveValue('JPEG'))
+  })
+  it.each(['success', 'failure'] as const)('ignores stale initial-load %s after a newer Reload completes', async (settlement) => {
+    const { api, fetch } = fixture(); const user = userEvent.setup()
+    let resolveInitial!: (value: Response) => void; let rejectInitial!: (reason: Error) => void; let loads = 0; let interfaceLoads = 0
+    const fresh = { ...udpState(), savedRevision: 2, configuration: { ...udpState().configuration, listenPort: 5100 } }
+    fetch.mockImplementation(async (url: string) => {
+      if (url.endsWith('/udp-diagnostics')) return apiResponse(udpDiagnostics)
+      if (url.endsWith('/network-interfaces')) return apiResponse(++interfaceLoads === 1 ? networkInterfaces : { ...networkInterfaces, advertisedBackendIpv4: '10.0.0.2', listenPort: 5100 })
+      if (++loads === 1) return new Promise<Response>((resolve, reject) => { resolveInitial = resolve; rejectInitial = reject })
+      return apiResponse(fresh)
+    })
+    render(<RaspberryPiUdpInputSettings api={api} />)
+    await user.click(screen.getByRole('button', { name: 'Reload expected input' })); await screen.findByText('Saved r2')
+    await act(async () => {
+      if (settlement === 'success') resolveInitial(apiResponse(udpState()))
+      else rejectInitial(new Error('stale load failed'))
+    })
+    expect(screen.getByText('Saved r2')).toBeVisible(); expect(screen.getByLabelText('UDP Listen Port')).toHaveValue(5100)
+    expect(screen.getByLabelText('Backend IPv4')).toHaveTextContent('10.0.0.2')
+    expect(screen.queryByText(/Unable to load expected-input settings/)).not.toBeInTheDocument()
   })
 })
