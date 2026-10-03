@@ -7,6 +7,8 @@ import com.filamentvision.core.runtime.StartOutcome
 import com.filamentvision.core.model.MeasurementStatus
 import com.filamentvision.core.fusion.FusionReason
 import com.filamentvision.core.frame.CameraId
+import com.filamentvision.core.metrics.MetricCounter
+import com.filamentvision.core.metrics.MetricLatency
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -15,6 +17,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RestContractTest {
+    @Test fun genericDiagnosticsExposeOnlySingleStreamMetricKeysWithoutChangingCoreMetrics() = testApplication {
+        val c = openApiComposition(); application { installRestApi(c.application) }
+        try {
+            c.metrics.record(MetricCounter.FUSION, 7)
+            c.metrics.record(MetricCounter.DATABASE_ROW, 9)
+            c.metrics.latency(MetricLatency.FUSION, 11.0)
+            c.metrics.latency(MetricLatency.PROCESSING, 3.0)
+            val response = client.get("/api/v1/devices/${c.deviceId}/diagnostics")
+            assertEquals(HttpStatusCode.OK, response.status)
+            val data = parse(response.bodyAsText())["data"]
+            assertEquals(setOf("elapsedMillis", "cameras", "counters", "latencies", "queuedMeasurements", "retainedSnapshots", "retainedSnapshotBytes", "backendVersion"),
+                data.fieldNames().asSequence().toSet())
+            assertEquals(listOf("DROPPED_INPUT", "DROPPED_PREVIEW", "WEBSOCKET_PUBLICATION", "DATABASE_BATCH", "DATABASE_ROW"),
+                data["counters"].map { it["name"].asText() })
+            assertEquals(listOf("PROCESSING", "PUBLICATION", "DATABASE"), data["latencies"].map { it["name"].asText() })
+            assertEquals(9L, data["counters"].single { it["name"].asText() == "DATABASE_ROW" }["rate"]["count"].asLong())
+            assertEquals(3.0, data["latencies"][0]["totalMillis"].asDouble(), 0.0)
+            assertEquals("camera", data["cameras"][0]["cameraId"].asText())
+            val internal = c.metrics.snapshot()
+            assertEquals(7L, internal.counters.getValue(MetricCounter.FUSION).count)
+            assertEquals(11.0, internal.latencies.getValue(MetricLatency.FUSION).totalMillis, 0.0)
+        } finally { c.close() }
+    }
     @Test fun stateAndLatestKeepSingleCameraEvidenceAndHideInternalState() = testApplication {
         val backend = FakeBackend()
         application { installRestApi(backend) { "corr1" } }

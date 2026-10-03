@@ -97,8 +97,8 @@ internal class FakeBackend : BackendApplication {
     override suspend fun deleteDraft(deviceId: String, draftId: String, commandId: String) { record("deleteDraft", deviceId, draftId, commandId) }
     override suspend fun cameras(deviceId: String): List<CameraView> { record("cameras", deviceId); return listOf(CameraView("camera", CameraState.AVAILABLE, true, true)) }
     override suspend fun diagnostics(deviceId: String): DiagnosticsView { record("diagnostics", deviceId); return DiagnosticsView(MetricsSnapshot(1000,
-        mapOf(MetricsCameraKey(deviceId, CameraId("A")) to CameraMetrics(CounterRate(10, 10.0), CounterRate(9, 9.0))),
-        mapOf(MetricCounter.FUSION to CounterRate(9, 9.0)), mapOf(MetricLatency.PROCESSING to LatencyMetrics(9, 18.0, 3.0))), 2, 1, 4, "phase2") }
+        mapOf(MetricsCameraKey(deviceId, CameraId("camera")) to CameraMetrics(CounterRate(10, 10.0), CounterRate(9, 9.0))),
+        mapOf(MetricCounter.DATABASE_ROW to CounterRate(9, 9.0)), mapOf(MetricLatency.PROCESSING to LatencyMetrics(9, 18.0, 3.0))), 2, 1, 4, "phase2") }
     override suspend fun errors(sessionId: String?): List<ErrorRecord> { record("errors", sessionId); return listOf(ErrorRecord("err1", sessionId, 1001, "CAMERA_UNAVAILABLE", "secret SELECT * FROM errors jdbc stack trace")) }
     override suspend fun snapshots(errorId: String): List<SnapshotRecord> { record("snapshots", errorId); return listOf(SnapshotRecord("snap1", "s1", 1001, "A", "C:/secret/encoded.bin", 7)) }
     override suspend fun snapshot(snapshotId: String): SnapshotContent { record("snapshot", snapshotId); return snapshotContent }

@@ -122,7 +122,10 @@ internal class ComposedBackendApplication(private val c: BackendComposition,
             when (result.outcome) {
                 RaspberryPiUdpApplyOutcome.CONFLICT -> conflict()
                 RaspberryPiUdpApplyOutcome.INVALID -> throw ApplicationFailure(ApplicationFailureCode.INVALID)
-                RaspberryPiUdpApplyOutcome.APPLIED -> udpView(result.outcome)
+                RaspberryPiUdpApplyOutcome.APPLIED -> {
+                    c.publishUdpInputState()
+                    udpView(result.outcome)
+                }
             }
         }
     }

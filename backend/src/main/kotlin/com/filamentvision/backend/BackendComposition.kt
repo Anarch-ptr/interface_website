@@ -159,6 +159,10 @@ class BackendComposition private constructor(
         events.publish(DomainEvent.Configuration(deviceId, revisions, epochMillis()))
         publishState()
     }
+    /** A committed UDP profile can change camera availability without a Runtime state emission.
+     * The facade holds commands; publishState captures camera views and sequence under its existing lock.
+     */
+    internal fun publishUdpInputState() = publishState()
     internal fun cameraViews() = listOf(CameraView(camera.value, when {
         inputSource.state.value == ImageInputState.ERROR -> CameraState.ERROR
         inputSource is RaspberryPiUdpInputSource && !inputSource.effectiveProfile.enabled -> CameraState.UNAVAILABLE

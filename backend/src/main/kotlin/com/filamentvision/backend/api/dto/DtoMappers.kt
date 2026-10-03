@@ -4,6 +4,8 @@ import com.filamentvision.backend.application.*
 import com.filamentvision.core.alarm.AlarmState
 import com.filamentvision.core.config.*
 import com.filamentvision.core.metrics.CounterRate
+import com.filamentvision.core.metrics.MetricCounter
+import com.filamentvision.core.metrics.MetricLatency
 import com.filamentvision.core.model.*
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.RuntimeSession
@@ -33,8 +35,8 @@ fun DeviceView.toDto() = StateDto(deviceId, connection.name, monitoring.lifecycl
 private fun CounterRate.toDto() = RateDto(count, perSecond.safe())
 fun DiagnosticsView.toDto() = DiagnosticsDto(metrics.elapsedMillis,
     metrics.cameras.map { (key, value) -> CameraMetricsDto(key.deviceId, key.cameraId.value, value.received.toDto(), value.processed.toDto()) },
-    metrics.counters.map { (key, value) -> CounterDto(key.name, value.toDto()) },
-    metrics.latencies.map { (key, value) -> LatencyDto(key.name, value.count, value.totalMillis.safe(), value.maximumMillis.safe()) },
+    metrics.counters.filterKeys { it != MetricCounter.FUSION }.map { (key, value) -> CounterDto(key.name, value.toDto()) },
+    metrics.latencies.filterKeys { it != MetricLatency.FUSION }.map { (key, value) -> LatencyDto(key.name, value.count, value.totalMillis.safe(), value.maximumMillis.safe()) },
     queuedMeasurements, retainedSnapshots, retainedSnapshotBytes, backendVersion)
 // Repository error messages may contain platform details. Only a public machine code crosses HTTP.
 fun ErrorRecord.toDto() = ErrorRecordDto(id, sessionId, timestamp,

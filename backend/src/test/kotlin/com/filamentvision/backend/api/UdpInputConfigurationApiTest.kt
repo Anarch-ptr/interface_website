@@ -13,9 +13,55 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import com.filamentvision.backend.input.profile.*
 import kotlinx.coroutines.Dispatchers
+import com.filamentvision.core.event.DomainEvent
+import com.filamentvision.core.event.EventReplay
 
 class UdpInputConfigurationApiTest {
     private val base = "/api/v1/devices/filamentvision-1/udp-input-configuration"
+
+    @Test fun appliedEnableAndDisablePublishCoherentStateWithoutRuntimeEmission() = testApplication {
+        val c = openApiComposition(); application { installRestApi(c.application) }
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        suspend fun state() = parse(client.get("/api/v1/devices/${c.deviceId}/state").bodyAsText())["data"]
+        try {
+            val runtimeBefore = c.runtime.state.value
+            var before = state()
+            assertEquals("UNAVAILABLE", before["cameras"][0]["state"].asText())
+            for ((index, enabled) in listOf(true, false).withIndex()) {
+                val revision = index + 1L
+                val save = client.put(base) {
+                    contentType(ContentType.Application.Json)
+                    setBody(udpSaveJson("save-state-$index", revision).replace("\"enabled\":false", "\"enabled\":$enabled"))
+                }
+                assertEquals(save.bodyAsText(), HttpStatusCode.OK, save.status)
+                assertEquals(before, state()) // Saving does not apply or publish a new source state.
+                val applyBody = udpApplyJson("apply-state-$index", revision + 1, revision + 1)
+                val apply = client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(applyBody) }
+                assertEquals(apply.bodyAsText(), HttpStatusCode.OK, apply.status)
+                val after = state()
+                val cameras = parse(client.get("/api/v1/devices/${c.deviceId}/cameras").bodyAsText())["data"]
+                assertEquals(if (enabled) "AVAILABLE" else "UNAVAILABLE", after["cameras"][0]["state"].asText())
+                assertEquals(cameras, after["cameras"])
+                val beforeSequence = before["eventSequence"].asLong()
+                assertEquals(beforeSequence + 1, after["eventSequence"].asLong())
+                val events = c.events.replayAfter(c.deviceId, beforeSequence) as EventReplay.Available
+                assertEquals(1, events.events.size)
+                val published = events.events.single()
+                assertEquals(after["eventSequence"].asLong(), published.sequence)
+                assertEquals(runtimeBefore, (published.event as DomainEvent.State).state)
+                assertEquals(published.sequence, c.checkpoint.sequence)
+                assertEquals(c.application.cameras(c.deviceId), c.checkpoint.cameras)
+                assertEquals(runtimeBefore, c.runtime.state.value)
+                assertEquals(0, source.activeProducerCount); assertEquals(0, source.activeReceiverCount)
+                assertEquals(0L, source.totalProducerStarts)
+                val replay = client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(applyBody) }
+                assertEquals(HttpStatusCode.OK, replay.status)
+                assertEquals(after, state())
+                assertEquals(published.sequence, c.events.metrics(c.deviceId).published)
+                before = after
+            }
+        } finally { c.close() }
+    }
 
     @Test fun missingRevisionsAndMalformedOrLegacyCommandsNeverMutateConfiguration() = testApplication {
         val c = openApiComposition(); application { installRestApi(c.application) { "corr1" } }
