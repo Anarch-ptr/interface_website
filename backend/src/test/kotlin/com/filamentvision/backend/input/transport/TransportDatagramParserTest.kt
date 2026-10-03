@@ -68,6 +68,81 @@ class TransportDatagramParserTest {
     }
 
     @Test
+    fun singleStreamParserAcceptsCompatibilityOneAndPreservesTimestampAndPayload() {
+        val header = StructuredTransportHeader(
+            compatibilityStreamId = 1u.toUByte(),
+            frameId = ULong.MAX_VALUE,
+            chunkIndex = 0,
+            chunkCount = 1,
+            sourceTimestampMicros = Long.MAX_VALUE,
+            payloadLength = 2,
+            framePayloadBytes = 2,
+        )
+        val bytes = encoded(header, byteArrayOf(0x80.toByte(), 0xff.toByte()))
+
+        val accepted = parser().parse(bytes, bytes.size, limits).accepted()
+
+        assertEquals(header, accepted.header)
+        assertEquals(1u.toUByte(), accepted.header.compatibilityStreamId)
+        assertEquals(Long.MAX_VALUE, accepted.header.sourceTimestampMicros)
+        assertArrayEquals(byteArrayOf(0x80.toByte(), 0xff.toByte()), accepted.payload.copyOwned())
+        bytes[34] = 7
+        assertEquals(7, accepted.payload[0].toInt())
+    }
+
+    @Test
+    fun singleStreamParserRejectsOtherCompatibilityBytesBeforeBorrowingPayload() {
+        var payloadViews = 0
+        val parser = TransportDatagramParser { bytes, offset, length ->
+            payloadViews++
+            BorrowedPayloadView(bytes, offset, length)
+        }
+        listOf(0, 2, 255).forEach { stream ->
+            val bytes = mutateValid(6, stream)
+
+            val rejected = parser.parse(bytes, bytes.size, limits).rejected()
+
+            assertEquals("stream $stream", TransportErrorCode.INVALID_TRANSPORT_HEADER, rejected.code)
+            assertEquals("stream $stream", 0, payloadViews)
+        }
+    }
+
+    @Test
+    fun singleStreamParserEnforcesConfiguredAndHardFrameLimitsBeforeBorrowingPayload() {
+        listOf(8 * 1024 * 1024, 32 * 1024 * 1024, Int.MAX_VALUE).forEach { maxFrameBytes ->
+            listOf(0x7fffffffL, 0x80000000L, 0xffffffffL).forEach { declaration ->
+                var payloadViews = 0
+                val parser = TransportDatagramParser { bytes, offset, length ->
+                    payloadViews++
+                    BorrowedPayloadView(bytes, offset, length)
+                }
+                val bytes = encoded(validHeader(framePayloadBytes = declaration))
+
+                val rejected = parser.parse(bytes, bytes.size, limits.copy(maxFrameBytes = maxFrameBytes)).rejected()
+
+                assertEquals("$declaration / $maxFrameBytes", TransportErrorCode.FRAME_TOO_LARGE, rejected.code)
+                assertEquals("$declaration / $maxFrameBytes", 0, payloadViews)
+            }
+        }
+    }
+
+    @Test
+    fun singleStreamParserAcceptsExactFrameLimitsAndRejectsOneByteOver() {
+        listOf(8 * 1024 * 1024, 32 * 1024 * 1024).forEach { maxFrameBytes ->
+            val exact = encoded(validHeader(framePayloadBytes = maxFrameBytes.toLong()))
+            val over = encoded(validHeader(framePayloadBytes = maxFrameBytes.toLong() + 1))
+
+            assertEquals(maxFrameBytes.toLong(), parser().parse(exact, exact.size,
+                limits.copy(maxFrameBytes = maxFrameBytes)).accepted().header.framePayloadBytes)
+            assertEquals(TransportErrorCode.FRAME_TOO_LARGE, parser().parse(over, over.size,
+                limits.copy(maxFrameBytes = maxFrameBytes)).rejected().code)
+        }
+        val overHardMax = encoded(validHeader(framePayloadBytes = 32L * 1024 * 1024 + 1))
+        assertEquals(TransportErrorCode.FRAME_TOO_LARGE, parser().parse(overHardMax, overHardMax.size,
+            limits.copy(maxFrameBytes = Int.MAX_VALUE)).rejected().code)
+    }
+
+    @Test
     fun rejectsInvalidFixedHeaderFieldsAndLengths() {
         val cases = listOf(
             mutateValid(0, 0) to TransportErrorCode.INVALID_TRANSPORT_HEADER,

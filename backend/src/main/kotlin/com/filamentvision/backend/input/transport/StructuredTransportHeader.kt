@@ -5,7 +5,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 data class StructuredTransportHeader(
-    val cameraId: UdpCameraId,
+    /** Reserved v1 compatibility byte at offset 6; the production stream uses value 1. */
+    val compatibilityStreamId: UByte,
     val frameId: ULong,
     val chunkIndex: Int,
     val chunkCount: Int,
@@ -15,7 +16,39 @@ data class StructuredTransportHeader(
     val protocolVersion: Int = 1,
     val headerLength: Int = StructuredTransportCodec.HEADER_BYTES,
     val flags: Int = 0,
-)
+) {
+    /** Adapter for legacy consumers while the single-stream production composition migrates. */
+    val cameraId: UdpCameraId
+        get() = when (compatibilityStreamId.toInt()) {
+            1 -> UdpCameraId.A
+            2 -> UdpCameraId.B
+            else -> error("Compatibility stream byte has no legacy camera identity")
+        }
+
+    constructor(
+        cameraId: UdpCameraId,
+        frameId: ULong,
+        chunkIndex: Int,
+        chunkCount: Int,
+        sourceTimestampMicros: Long,
+        payloadLength: Int,
+        framePayloadBytes: Long,
+        protocolVersion: Int = 1,
+        headerLength: Int = StructuredTransportCodec.HEADER_BYTES,
+        flags: Int = 0,
+    ) : this(
+        compatibilityStreamId = (if (cameraId == UdpCameraId.A) 1 else 2).toUByte(),
+        frameId = frameId,
+        chunkIndex = chunkIndex,
+        chunkCount = chunkCount,
+        sourceTimestampMicros = sourceTimestampMicros,
+        payloadLength = payloadLength,
+        framePayloadBytes = framePayloadBytes,
+        protocolVersion = protocolVersion,
+        headerLength = headerLength,
+        flags = flags,
+    )
+}
 
 object StructuredTransportCodec {
     const val HEADER_BYTES = 34
@@ -35,7 +68,7 @@ object StructuredTransportCodec {
         buffer.put(magic)
         buffer.put(header.protocolVersion.toByte())
         buffer.put(header.headerLength.toByte())
-        buffer.put(if (header.cameraId == UdpCameraId.A) 1 else 2)
+        buffer.put(header.compatibilityStreamId.toByte())
         buffer.put(header.flags.toByte())
         buffer.putLong(header.frameId.toLong())
         buffer.putShort(header.chunkIndex.toShort())

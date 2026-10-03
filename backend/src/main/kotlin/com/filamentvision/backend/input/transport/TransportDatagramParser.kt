@@ -54,10 +54,22 @@ class TransportDatagramParser(
     private val payloadViewFactory: BorrowedPayloadViewFactory =
         BorrowedPayloadViewFactory(::BorrowedPayloadView),
 ) {
+    /** Single-stream production policy; the reserved v1 byte must be 1. */
+    fun parse(bytes: ByteArray, length: Int, limits: TransportLimits): TransportParseResult =
+        parseWithPolicy(bytes, length, null, limits)
+
+    /** Legacy expected-camera adapter retained until its callers migrate. */
     fun parse(
         bytes: ByteArray,
         length: Int,
         expectedCamera: UdpCameraId,
+        limits: TransportLimits,
+    ): TransportParseResult = parseWithPolicy(bytes, length, expectedCamera, limits)
+
+    private fun parseWithPolicy(
+        bytes: ByteArray,
+        length: Int,
+        expectedCamera: UdpCameraId?,
         limits: TransportLimits,
     ): TransportParseResult {
         if (length !in StructuredTransportCodec.HEADER_BYTES..bytes.size) {
@@ -76,12 +88,16 @@ class TransportDatagramParser(
         if (headerLength != StructuredTransportCodec.HEADER_BYTES) {
             return rejected(TransportErrorCode.INVALID_TRANSPORT_HEADER, "Transport header length must be 34")
         }
-        val camera = when (buffer.get().toInt() and 0xff) {
+        val compatibilityStreamId = buffer.get().toUByte()
+        if (expectedCamera == null && compatibilityStreamId.toInt() != 1) {
+            return rejected(TransportErrorCode.INVALID_TRANSPORT_HEADER, "Version 1 compatibility stream byte must be 1")
+        }
+        val camera = when (compatibilityStreamId.toInt()) {
             1 -> UdpCameraId.A
             2 -> UdpCameraId.B
             else -> return rejected(TransportErrorCode.INVALID_TRANSPORT_HEADER, "Unknown transport camera identifier")
         }
-        if (camera != expectedCamera) {
+        if (expectedCamera != null && camera != expectedCamera) {
             return rejected(TransportErrorCode.CAMERA_ID_MISMATCH, "Transport camera does not match receiver")
         }
         val flags = buffer.get().toInt() and 0xff
@@ -110,12 +126,13 @@ class TransportDatagramParser(
         if (length != headerLength + payloadLength) {
             return rejected(TransportErrorCode.INVALID_CHUNK_LENGTH, "Datagram length does not match payloadLength")
         }
-        if (framePayloadBytes <= 0L || framePayloadBytes > limits.maxFrameBytes.toLong()) {
+        if (framePayloadBytes <= 0L || framePayloadBytes > limits.maxFrameBytes.toLong() ||
+            framePayloadBytes > 32L * 1024 * 1024) {
             return rejected(TransportErrorCode.FRAME_TOO_LARGE, "Frame payload declaration exceeds configured limit")
         }
 
         val header = StructuredTransportHeader(
-            cameraId = camera,
+            compatibilityStreamId = compatibilityStreamId,
             frameId = frameId,
             chunkIndex = chunkIndex,
             chunkCount = chunkCount,

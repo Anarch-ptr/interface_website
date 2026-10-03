@@ -28,6 +28,13 @@ class SingleCameraMigrationCharacterizationTest {
     @Test fun streamOneFixturePreservesEvery34ByteHeaderOffset() {
         val (header, payload) = transportFixture()
         val bytes = StructuredTransportCodec.encode(header, payload)
+        val neutralHeader = StructuredTransportHeader(
+            compatibilityStreamId = 1u.toUByte(), frameId = 0x0102030405060708uL,
+            chunkIndex = 0x0102, chunkCount = 0x0304,
+            sourceTimestampMicros = 0x0102030405060708L,
+            payloadLength = 3, framePayloadBytes = 0x01020304,
+        )
+        val neutralBytes = StructuredTransportCodec.encode(neutralHeader, payload)
         val expectedHeader = byteArrayOf(
             0x46, 0x56, 0x55, 0x31, 1, 34, 1, 0,
             1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4,
@@ -35,6 +42,7 @@ class SingleCameraMigrationCharacterizationTest {
         )
         assertEquals(34, StructuredTransportCodec.HEADER_BYTES)
         assertEquals(37, bytes.size)
+        assertArrayEquals(bytes, neutralBytes)
         assertArrayEquals(expectedHeader, bytes.copyOfRange(0, 34))
         assertArrayEquals(byteArrayOf(0x10, 0x20, 0x30), bytes.copyOfRange(34, 37))
         // Each tuple names a field boundary, independently of the production serializer.
@@ -46,6 +54,13 @@ class SingleCameraMigrationCharacterizationTest {
             TransportLimits(maxFrameBytes = 32 * 1024 * 1024)) as TransportParseResult.Accepted
         assertEquals(header, parsed.datagram.header)
         assertArrayEquals(payload, parsed.datagram.payload.copyOwned())
+        val neutralParsed = TransportDatagramParser().parse(neutralBytes, neutralBytes.size,
+            TransportLimits(maxFrameBytes = 32 * 1024 * 1024)) as TransportParseResult.Accepted
+        assertEquals(neutralHeader, neutralParsed.datagram.header)
+        assertEquals(1u.toUByte(), neutralParsed.datagram.header.compatibilityStreamId)
+        assertEquals(0x0102030405060708L, neutralParsed.datagram.header.sourceTimestampMicros)
+        assertEquals(3, neutralParsed.datagram.header.payloadLength)
+        assertArrayEquals(payload, neutralParsed.datagram.payload.copyOwned())
     }
 
     @Test fun unsignedFramePayloadDeclarationsAreRejectedBeforeBorrowingPayload() {
