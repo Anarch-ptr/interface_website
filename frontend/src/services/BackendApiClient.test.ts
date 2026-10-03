@@ -176,6 +176,28 @@ describe('BackendApiClient single-stream contracts', () => {
     await expect(new BackendApiClient().getNetworkInterfaces()).rejects.toBe(aborted)
   })
 
+  const bodyCancellationCases: [string, (api: BackendApiClient, signal: AbortSignal) => Promise<unknown>][] = [
+    ['configuration GET', (api, signal) => api.getRaspberryPiUdpConfiguration('pi', signal)],
+    ['configuration Save', (api, signal) => api.saveRaspberryPiUdpConfiguration('pi', profile(), 1, signal)],
+    ['configuration Apply', (api, signal) => api.applyRaspberryPiUdpConfiguration('pi', 1, 1, signal)],
+    ['network interfaces', (api, signal) => api.getNetworkInterfaces(signal)],
+    ['diagnostics', (api, signal) => api.getRaspberryPiUdpDiagnostics('pi', signal)],
+    ['Inspector create', (api, signal) => api.createRaspberryPiInspectorLease('pi', 128, signal)],
+    ['Inspector release', (api, signal) => api.releaseRaspberryPiInspectorLease('pi', 'lease', signal)],
+    ['Inspector poll', (api, signal) => api.getRaspberryPiInspector('pi', 'lease', 128, undefined, signal)],
+  ]
+  it.each(bodyCancellationCases)('preserves a custom signal reason during %s body reading', async (_name, call) => {
+    const controller = new AbortController()
+    const reason = new Error('custom cancellation reason')
+    const value = response(interfaces)
+    vi.spyOn(value, 'json').mockImplementation(async () => {
+      controller.abort(reason)
+      throw reason
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(value))
+    await expect(call(new BackendApiClient('/api/v1', () => 'cmd'), controller.signal)).rejects.toBe(reason)
+  })
+
   it('sends the original draft and preserves backend rejection instead of treating feedback as authority', async () => {
     const draft = profile()
     draft.envelope.headerHex = 'aa01'

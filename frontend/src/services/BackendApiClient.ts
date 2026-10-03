@@ -46,7 +46,7 @@ export class BackendApiClient {
     const response = await this.singleFetch(`${this.device(device)}/packet-inspector?leaseId=${encodeURIComponent(lease)}&previewBytes=${previewBytes}`,
       { headers: etag ? { 'If-None-Match': etag } : undefined, signal })
     if (response.status === 304) return { unchanged: true, etag: response.headers.get('ETag') }
-    const snapshot = await this.singleRead<Single.InspectorSnapshot>(response)
+    const snapshot = await this.singleRead<Single.InspectorSnapshot>(response, signal)
     return { unchanged: false, etag: response.headers.get('ETag'), snapshot }
   }
 
@@ -92,18 +92,18 @@ export class BackendApiClient {
     }
   }
   private async singleGet<T>(url: string, signal?: AbortSignal): Promise<T> {
-    return this.singleRead<T>(await this.singleFetch(url, { signal }))
+    return this.singleRead<T>(await this.singleFetch(url, { signal }), signal)
   }
   private async singleJson<T>(url: string, method: string, body: unknown, signal?: AbortSignal): Promise<T> {
     return this.singleRead<T>(await this.singleFetch(url, { method, headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body), signal }))
+      body: body === undefined ? undefined : JSON.stringify(body), signal }), signal)
   }
-  private async singleRead<T>(response: Response): Promise<T> {
+  private async singleRead<T>(response: Response, signal?: AbortSignal): Promise<T> {
     const invalid = () => new BackendApiError(response.status, 'INVALID_RESPONSE', 'Invalid Backend response.', '')
     let payload: unknown
     try { payload = await response.json() }
     catch (reason) {
-      if (record(reason) && reason.name === 'AbortError') throw reason
+      if (signal?.aborted || (record(reason) && reason.name === 'AbortError')) throw reason
       throw invalid()
     }
     if (!record(payload)) throw invalid()
