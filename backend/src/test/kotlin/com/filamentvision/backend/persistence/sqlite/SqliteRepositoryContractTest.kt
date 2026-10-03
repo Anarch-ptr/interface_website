@@ -346,6 +346,43 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
             }
     }
 
+    @Test fun versionThreeMigrationClearsLegacyUnicodeSourceIpAndRetainsOtherCompatibleFields() = runBlocking {
+        // UDP profiles first exist in V003; V001/V002 upgrades are covered without profile rows.
+        val path = temporary.root.toPath().resolve("unicode-source-ip.db")
+        val old = udpProfiles(5901, 5902).let { it.copy(cameraA = it.cameraA.copy(
+            sourceIp = "１２７.0.0.1", transportMode = TransportMode.STRUCTURED_CHUNKED,
+            payload = PayloadProfile.Gray8(640, 480), applicationFraming = safeFraming(),
+            transportLimits = TransportLimits(2, 3_000_000, 1200, 3000, 1300))) }
+        val bytes = UdpInputProfileCodec.encode(old)
+        assertEquals(old, UdpInputProfileCodec.decode(bytes))
+        lateinit var originalRows: Map<String, Pair<List<String>, List<List<String?>>>>
+        createLegacyDatabase(path, 3) { c ->
+            insertLegacySession(c)
+            insertLegacyMeasurement(c, "legacy", 10)
+            insertLegacyProfile(c, bytes)
+            c.createStatement().use { it.execute("UPDATE udp_input_state SET applied_revision=1") }
+            originalRows = legacyRows(c)
+        }
+        SqliteDatabase(path).use { db ->
+            val state = SqliteRaspberryPiUdpInputProfileRepository(db).state()
+            assertEquals(1L, state.saved.revision)
+            assertEquals(state.saved, state.applied)
+            assertEquals(RaspberryPiUdpInputProfile(false, NetworkInterfaceSelection.Auto, 5901, null,
+                ImagePayloadProfile.Gray8(640, 480), DatagramEnvelopeProfile("AB CD", "12 EF"),
+                TransportLimits(2, 3_000_000, 1200, 3000, 1300)), state.saved.profile)
+            db.access { c ->
+                assertEquals(4L, scalar(c, "PRAGMA user_version"))
+                assertEquals(originalRows, legacyRows(c, originalRows.mapValues { it.value.first }))
+                assertEquals(1L, scalar(c, "SELECT COUNT(*) FROM udp_input_revisions"))
+                assertEquals(1L, scalar(c, "SELECT applied_revision FROM udp_input_state"))
+                c.createStatement().use { s -> s.executeQuery("SELECT payload FROM udp_input_revisions WHERE revision=1").use { row ->
+                    row.next(); assertArrayEquals(bytes, row.getBytes(1))
+                    assertEquals("１２７.0.0.1", UdpInputProfileCodec.decode(row.getBytes(1)).cameraA.sourceIp)
+                } }
+            }
+        }
+    }
+
     @Test fun failedMigrationRollsBackDdlSeedAndVersionWithoutChangingLegacyBytes() {
         val path = temporary.root.toPath().resolve("corrupt-profile.db")
         val corrupt = byteArrayOf(0, 0, 0, 99)

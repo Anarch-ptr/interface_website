@@ -62,9 +62,12 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
             }
         }
         val defaults = RaspberryPiUdpInputProfile.defaults()
+        val validator = RaspberryPiUdpInputProfileValidator()
         var profile = defaults
         if (old != null) {
-            profile = defaults.copy(listenPort = old.listenPort, raspberryPiIpv4 = old.sourceIp)
+            profile = defaults.copy(listenPort = old.listenPort)
+            val sourceCandidate = profile.copy(raspberryPiIpv4 = old.sourceIp)
+            if (validator.validate(sourceCandidate).isValid) profile = sourceCandidate
             val payload = when (val value = old.payload) {
                 is PayloadProfile.Jpeg -> ImagePayloadProfile.Jpeg(value.maxFrameBytes, value.expectedWidth, value.expectedHeight)
                 is PayloadProfile.Gray8 -> ImagePayloadProfile.Gray8(value.width, value.height)
@@ -73,7 +76,7 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
                 is PayloadProfile.Diameter -> defaults.payload
             }
             val candidate = profile.copy(payload = payload, transportLimits = old.transportLimits)
-            if (RaspberryPiUdpInputProfileValidator().validate(candidate).isValid) profile = candidate
+            if (validator.validate(candidate).isValid) profile = candidate
             val framing = old.applicationFraming
             if (framing.headerEnabled && framing.footerEnabled &&
                 framing.headerFormat == FramingFormat.HEX && framing.footerFormat == FramingFormat.HEX &&
