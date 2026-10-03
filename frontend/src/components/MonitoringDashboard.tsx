@@ -18,7 +18,7 @@ export function MonitoringDashboard({ store, api }: { store: MonitoringStore; ap
   })
   const latestAlarm = backendAlarms(live.recoveredAlarms)[0]
   const latestError = backendErrors(live.recoveredErrors)[0]
-  const alarm = live.backendState?.alarm ?? latestAlarm?.to
+  const alarm = live.backendState?.alarm
   const alarmLabel = alarm?.level === 'CRITICAL' ? 'Critical' : alarm?.level === 'WARNING' ? 'Warning' : 'Within limits'
   const direction = alarm?.direction === 'HIGH' ? 'High diameter' : alarm?.direction === 'LOW' ? 'Low diameter' : 'Within limits'
   const sessionCount = live.recoveredSessions.length
@@ -29,7 +29,7 @@ export function MonitoringDashboard({ store, api }: { store: MonitoringStore; ap
       <SystemHealth live={live} api={api} />
       <div className="dashboard-grid">
         <LiveCameraPreview preview={live.preview} />
-        <DiameterReadingPanel reading={reading} configuration={configuration} />
+        <DiameterReadingPanel reading={reading} configuration={configuration} alarm={alarm} />
         <section className="panel trend-panel" aria-labelledby="trend-title">
           <div className="panel-heading"><div><p className="panel-kicker">RECENT TREND / HISTORY</p><h3 id="trend-title">Diameter stability</h3></div><span>{readings.length} / {configuration.recentTrendCapacity} samples</span></div>
           <TrendChart readings={readings} configuration={configuration} />
@@ -38,8 +38,8 @@ export function MonitoringDashboard({ store, api }: { store: MonitoringStore; ap
           <div className="panel-heading"><div><p className="panel-kicker">WARNING / ALARM</p><h3 id="latest-alarm-title">Event context</h3></div></div>
           {alarm ? <div className={`alarm-callout ${alarm.level === 'CRITICAL' ? 'out_of_tolerance' : alarm.level.toLowerCase()}`}>
             <strong>{alarm.level === 'NORMAL' ? 'Within limits' : `${alarmLabel} · ${direction}`}</strong>
-            {latestAlarm && <span>{latestAlarm.to.level === 'NORMAL' ? 'Recovered' : `Latest transition: ${latestAlarm.to.level}`} · {latestAlarm.diameterMm === null ? 'Diameter unavailable' : `${latestAlarm.diameterMm.toFixed(3)} mm`} · {new Date(latestAlarm.timestamp).toLocaleTimeString()}</span>}
           </div> : <div className="empty-compact"><div><strong>Awaiting Backend alarm context</strong><span>Reliable alarm transitions appear here.</span></div></div>}
+          {latestAlarm && <p className="session-context">{latestAlarm.to.level === 'NORMAL' ? 'Recovered' : `Latest transition: ${latestAlarm.to.level}`} · {latestAlarm.diameterMm === null ? 'Diameter unavailable' : `${latestAlarm.diameterMm.toFixed(3)} mm`} · {new Date(latestAlarm.timestamp).toLocaleTimeString()}</p>}
           {latestError && <p className="backend-error" role="alert">{latestError.code}: {latestError.message}</p>}
           <p className="session-context">{live.backendState?.session ? `Session ${live.backendState.session.id} · ` : ''}{sessionCount} retained {sessionCount === 1 ? 'session' : 'sessions'}</p>
         </section>

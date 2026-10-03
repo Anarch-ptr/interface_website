@@ -33,7 +33,7 @@ export function SystemHealth({ live, api = defaultApi }: { live: LiveMonitoringS
     <div className="health-item udp-status" role="status"><div><span>Raspberry Pi UDP</span><strong>{diagnostics ? statusLabels[diagnostics.status] ?? 'UDP status unavailable' : 'UDP status unavailable'}</strong>{diagnostics?.statusDetail && <small>{diagnostics.statusDetail}</small>}</div></div>
     <HealthItem label="Backend connection" value={connection} healthy="CONNECTED" />
     <HealthItem label="Monitoring" value={monitoring} healthy="RUNNING" />
-    <HealthItem label="Measurement status" value={live.latestBackendReading?.status.replaceAll('_', ' ') ?? 'Waiting for Raspberry Pi'} healthy="NORMAL" />
+    <HealthItem label="Measurement quality" value={live.latestBackendReading?.status.replaceAll('_', ' ') ?? 'Waiting for Raspberry Pi'} healthy="NORMAL" />
   </section>
 }
 

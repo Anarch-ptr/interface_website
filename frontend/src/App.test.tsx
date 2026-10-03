@@ -119,6 +119,128 @@ function emitDiameter(
 }
 
 describe('FilamentVision application', () => {
+  it('clears current values across two sessions while retaining history without a NORMAL transition', async () => {
+    const { source, store, runtime, view } = createFixture()
+    const alarm = { id: 'old-alarm', sessionId: 'session-1', timestamp: 1000, diameterMm: 1.78,
+      from: { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 },
+      to: { level: 'CRITICAL', direction: 'HIGH', deviationPercent: 1.71 } }
+    try {
+      act(() => {
+        source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
+          session: { id: 'session-1' }, latestMeasurement: measurement(1.78, 1000), alarm: alarm.to })
+        source.emit({ id: 'old-reading', sessionId: 'session-1', measurement: measurement(1.78, 1000) })
+        source.event({ type: 'alarm.transition', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 1000, payload: alarm })
+        source.event({ type: 'state.changed', sequence: 6, deviceId: 'filamentvision-1', occurredAt: 2000,
+          payload: { monitoring: 'COMPLETED', session: null, activeProducerCount: 0 } })
+      })
+      expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent('—')
+      expect(screen.queryByText('Critical · High diameter')).not.toBeInTheDocument()
+      act(() => source.event({ type: 'session.started', sequence: 7, deviceId: 'filamentvision-1', occurredAt: 3000,
+        payload: { id: 'session-2', startedAt: 3000, endedAt: null } }))
+      expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent('—')
+      act(() => {
+        source.event({ type: 'state.changed', sequence: 8, deviceId: 'filamentvision-1', occurredAt: 3000,
+          payload: { monitoring: 'RUNNING', session: { id: 'session-2' }, activeProducerCount: 1 } })
+        source.emit({ id: 'new-reading', sessionId: 'session-2', measurement: measurement(1.75, 4000) })
+        source.recover({ sequence: 8, complete: true, sessions: [], errors: [], alarms: [alarm],
+          measurements: [{ id: 'old-reading', sessionId: 'session-1', measurement: measurement(1.78, 1000) }] })
+      })
+      expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent('1.750')
+      expect(screen.queryByText('Critical · High diameter')).not.toBeInTheDocument()
+      expect(screen.getByText('Awaiting Backend alarm context')).toBeVisible()
+      expect(store.getLiveSnapshot().recentBackendTrend).toHaveLength(2)
+      expect(store.getLiveSnapshot().recoveredAlarms).toHaveLength(1)
+    } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+  })
+
+  it.each(['REST snapshot', 'state.changed', 'session.started'] as const)(
+    'clears previous current state when %s directly introduces a new session', async kind => {
+      const { source, store, runtime, view } = createFixture()
+      try {
+        act(() => {
+          source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
+            session: { id: 'session-1' }, latestMeasurement: measurement(1.78, 1000),
+            alarm: { level: 'CRITICAL', direction: 'HIGH', deviationPercent: 1.71 } })
+          source.emit({ id: 'old', sessionId: 'session-1', measurement: measurement(1.78, 1000) })
+          if (kind === 'REST snapshot') source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING',
+            eventSequence: 5, session: { id: 'session-2' }, latestMeasurement: null })
+          else source.event({ type: kind, sequence: 5, deviceId: 'filamentvision-1', occurredAt: 2000,
+            payload: kind === 'session.started' ? { id: 'session-2', startedAt: 2000, endedAt: null } :
+              { monitoring: 'RUNNING', session: { id: 'session-2' }, activeProducerCount: 1 } })
+        })
+        expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent('—')
+        expect(screen.queryByText('Critical · High diameter')).not.toBeInTheDocument()
+        expect(store.getLiveSnapshot().recentBackendTrend).toHaveLength(1)
+      } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+    },
+  )
+
+  it('retains a newer live evidence sequence when equal-time historical recovery arrives', async () => {
+    const { source, store, runtime, view } = createFixture()
+    const current = { ...measurement(1.75, 1000), evidence: [{ ...measurement(1.75, 1000).evidence[0], sequence: 100 }] }
+    const historical = { ...measurement(1.77, 1000), evidence: [{ ...measurement(1.77, 1000).evidence[0], sequence: 1 }] }
+    try {
+      act(() => {
+        source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
+          session: { id: 'session-1' }, latestMeasurement: null })
+        source.emit({ id: 'live', sessionId: 'session-1', measurement: current })
+        source.recover({ sequence: 4, complete: false, sessions: [], errors: [], alarms: [],
+          measurements: [{ id: 'historical', sessionId: 'session-1', measurement: historical }] })
+      })
+      expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent('1.750')
+      expect(store.getLiveSnapshot().latestBackendReading?.evidence[0].sequence).toBe(100)
+      expect(store.getLiveSnapshot().recentBackendTrend).toHaveLength(2)
+    } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+  })
+
+  it('keeps the newest recovered alarm through more than 300 overlapping history records', async () => {
+    const { source, store, runtime, view } = createFixture()
+    const alarm = (id: string, timestamp: number) => ({ id, sessionId: 'session-1', timestamp, diameterMm: 1.78,
+      from: { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 }, to: { level: 'CRITICAL', direction: 'HIGH', deviationPercent: 1.71 } })
+    try {
+      act(() => {
+        source.recover({ sequence: 4, complete: false, sessions: [], errors: [], measurements: [], alarms: [alarm('newest', 10_000)] })
+        source.recover({ sequence: 4, complete: true, sessions: [], errors: [], measurements: [],
+          alarms: [alarm('newest', 10_000), ...Array.from({ length: 400 }, (_, index) => alarm(`old-${index}`, index))] })
+      })
+      const records = store.getLiveSnapshot().recoveredAlarms as { id: string; timestamp: number }[]
+      expect(records).toHaveLength(300)
+      expect(records.some(value => value.id === 'newest')).toBe(true)
+      expect(records.some(value => value.id === 'old-0')).toBe(false)
+      expect(new Set(records.map(value => value.id)).size).toBe(300)
+      expect(records.map(value => value.timestamp)).toEqual([...records.map(value => value.timestamp)].sort((left, right) => left - right))
+      expect(records.at(-1)?.id).toBe('newest')
+    } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+  })
+
+  it.each([['WARNING', 1.77, 'Warning'], ['CRITICAL', 1.78, 'Critical']] as const)(
+    'keeps valid NORMAL quality distinct from authoritative %s severity', async (level, diameterMm, label) => {
+      const { source, runtime, view } = createFixture()
+      try {
+        act(() => source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
+          session: { id: 'session-1' }, latestMeasurement: { ...measurement(diameterMm, 1000), status: 'NORMAL' },
+          alarm: { level, direction: 'HIGH', deviationPercent: 1.7 } }))
+        const panel = within(view.container.querySelector('.reading-panel') as HTMLElement)
+        expect(panel.queryByText('WITHIN TOLERANCE')).not.toBeInTheDocument()
+        expect(panel.queryByText('Stable')).not.toBeInTheDocument()
+        expect(panel.getByText(label)).toBeVisible()
+        expect(panel.getByLabelText('Measurement quality')).toHaveTextContent('NORMAL')
+      } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+    },
+  )
+
+  it('does not claim tolerance from valid measurement quality without alarm evidence', async () => {
+    const { source, runtime, view } = createFixture()
+    try {
+      act(() => source.backend({ deviceId: 'filamentvision-1', connection: 'CONNECTED', monitoring: 'RUNNING', eventSequence: 4,
+        session: { id: 'session-1' }, latestMeasurement: { ...measurement(1.78, 1000), status: 'NORMAL' } }))
+      const panel = within(view.container.querySelector('.reading-panel') as HTMLElement)
+      expect(panel.queryByText('WITHIN TOLERANCE')).not.toBeInTheDocument()
+      expect(panel.queryByText('Stable')).not.toBeInTheDocument()
+      expect(panel.getByText('Valid measurement')).toBeVisible()
+    } finally { view.unmount(); await act(async () => Promise.resolve()); runtime.dispose() }
+  })
+
   it('waits for real Backend data without an image, sample, or asserted healthy feed', async () => {
     const { source, runtime, view } = createFixture()
     try {
@@ -175,11 +297,15 @@ describe('FilamentVision application', () => {
     expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent(
       '1.750',
     )
-    expect(screen.getByText('Stable')).toBeVisible()
+    expect(screen.getByText('Valid measurement')).toBeVisible()
     expect(screen.getByLabelText('Measurement confidence')).toHaveTextContent('93%')
     expect(screen.getByLabelText('Measurement captured at')).toHaveAttribute('datetime', '1970-01-01T00:00:01.000Z')
 
     emitDiameter(source, 1.78, 2_000)
+    act(() => source.event({ type: 'alarm.transition', sequence: 5, deviceId: 'filamentvision-1', occurredAt: 2000,
+      payload: { id: 'critical-alarm', sessionId: 'session-1', timestamp: 2000, diameterMm: 1.78,
+        from: { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 },
+        to: { level: 'CRITICAL', direction: 'HIGH', deviationPercent: 1.71 } } }))
     expect(screen.getByText('Critical')).toBeVisible()
     expect(screen.getAllByText('OUT OF TOLERANCE').length).toBeGreaterThan(0)
     act(() => source.preview({ url: 'blob:second', width: 640, height: 480, timestamp: 2000, sourceSequence: 2 }))
@@ -215,12 +341,14 @@ describe('FilamentVision application', () => {
         payload: { monitoring: 'COMPLETED', session: null, activeProducerCount: 0 } })
     })
     expect(screen.getByText('COMPLETED')).toBeVisible()
-    expect(screen.getByText(/Critical · High diameter/)).toBeVisible()
+    expect(screen.getByText('Awaiting Backend alarm context')).toBeVisible()
+    expect(screen.getByText(/Latest transition: CRITICAL/)).toBeVisible()
     expect(screen.getByText(/Unable to decode frame/)).toBeVisible()
     expect(screen.getByText('1 retained session')).toBeVisible()
     expect(screen.getByText('1 / 300 samples')).toBeVisible()
     emitDiameter(source, 1.75, 3000)
-    expect(screen.getByText(/Critical · High diameter/)).toBeVisible()
+    expect(screen.queryByText(/Critical · High diameter/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Current filament diameter')).toHaveTextContent('—')
     await user.click(screen.getByRole('button', { name: 'Alarm History' }))
     expect(screen.getByText('High diameter')).toBeVisible()
     expect(screen.getByText('1.780 mm')).toBeVisible()
@@ -250,7 +378,7 @@ describe('FilamentVision application', () => {
           to: { level: 'CRITICAL', direction: 'HIGH', deviationPercent: 1.71 } }] })
     })
     expect(screen.queryByText('Critical · High diameter')).not.toBeInTheDocument()
-    expect(screen.getByText('Within limits')).toBeVisible()
+    expect(within(view.container.querySelector('.alarm-summary') as HTMLElement).getByText('Within limits')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Alarm History' }))
     expect(screen.queryByText('Active')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Monitor' }))
@@ -258,7 +386,7 @@ describe('FilamentVision application', () => {
       payload: { id: 'replayed-alarm', sessionId: 'old', timestamp: 1000, diameterMm: 1.78,
         from: { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 },
         to: { level: 'CRITICAL', direction: 'HIGH', deviationPercent: 1.71 } } }))
-    expect(screen.getByText('Within limits')).toBeVisible()
+    expect(within(view.container.querySelector('.alarm-summary') as HTMLElement).getByText('Within limits')).toBeVisible()
     act(() => source.event({ type: 'alarm.transition', sequence: 11, deviceId: 'filamentvision-1', occurredAt: 6000,
       payload: { id: 'new-alarm', sessionId: 'current', timestamp: 6000, diameterMm: 1.77,
         from: { level: 'NORMAL', direction: 'NONE', deviationPercent: 0 },
@@ -338,8 +466,8 @@ describe('FilamentVision application', () => {
 })
 
 function measurement(diameterMm: number, timestamp: number): BackendMeasurement {
-  return { evidence: [], diameterMm, confidence: 0.93, timestamp,
-    status: diameterMm > 1.775 ? 'OUT_OF_TOLERANCE' : diameterMm > 1.762 ? 'WARNING' : 'NORMAL' }
+  return { evidence: [{ cameraId: 'camera', timestamp, sequence: timestamp, pixelWidth: 100,
+    diameterMm, confidence: 0.93, valid: true, source: 'VISION' }], diameterMm, confidence: 0.93, timestamp, status: 'NORMAL' }
 }
 
 function udpApiFixture(): BackendApiClient {
