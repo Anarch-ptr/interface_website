@@ -2,6 +2,10 @@ package com.filamentvision.backend.persistence.sqlite
 
 import com.filamentvision.backend.input.profile.*
 import java.io.*
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 
 /** Single image stream persistence, independent of REST and the legacy two-camera codec. */
 object RaspberryPiUdpInputProfileCodec {
@@ -81,7 +85,15 @@ object RaspberryPiUdpInputProfileCodec {
     }
 
     private fun DataOutputStream.writeInterfaceId(value: String) {
-        val bytes = value.toByteArray(Charsets.UTF_8)
+        val encoded = try {
+            StandardCharsets.UTF_8.newEncoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .encode(CharBuffer.wrap(value))
+        } catch (error: CharacterCodingException) {
+            throw IllegalArgumentException("Malformed interface identifier", error)
+        }
+        val bytes = ByteArray(encoded.remaining()).also { encoded.get(it) }
         writeInt(bytes.size)
         write(bytes)
     }

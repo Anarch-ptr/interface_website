@@ -52,6 +52,14 @@ class RaspberryPiUdpInputProfileCodecTest {
         assertThrows(IllegalArgumentException::class.java) { decode(corrupt) }
     }
 
+    @Test fun unpairedHighSurrogateIdentifierIsRejectedBeforeEncodingReturns() {
+        rejectsMalformedIdentifier("wifi-\uD800")
+    }
+
+    @Test fun unpairedLowSurrogateIdentifierIsRejectedBeforeEncodingReturns() {
+        rejectsMalformedIdentifier("wifi-\uDC00")
+    }
+
     @Test fun versionOneRoundTripsDisabledDefaults() {
         val expected = RaspberryPiUdpInputProfile.defaults()
         val encoded = encode(expected)
@@ -151,4 +159,10 @@ class RaspberryPiUdpInputProfileCodecTest {
     private fun decode(bytes: ByteArray) = RaspberryPiUdpInputProfileCodec.decode(bytes)
     private fun specific(identifier: String) = RaspberryPiUdpInputProfile.defaults().copy(
         networkInterface = NetworkInterfaceSelection.Specific(identifier, "192.168.1.10"))
+    private fun rejectsMalformedIdentifier(identifier: String) {
+        val candidate = specific(identifier)
+        assertTrue(RaspberryPiUdpInputProfileValidator().validate(candidate).isValid)
+        assertThrows(IllegalArgumentException::class.java) { encode(candidate) }
+        assertEquals(identifier, (candidate.networkInterface as NetworkInterfaceSelection.Specific).interfaceId)
+    }
 }
