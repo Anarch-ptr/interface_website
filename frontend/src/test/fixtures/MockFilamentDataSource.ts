@@ -1,14 +1,14 @@
-import { createDiameterReading } from '../domain/measurement'
+import { createDiameterReading } from '../../domain/measurement'
 import {
   VisionSourceState,
   type MonitoringConfiguration,
-} from '../domain/monitoring'
+} from '../../domain/monitoring'
 import type {
   FilamentDataSource,
   ReadingListener,
   SourceStateListener,
   Unsubscribe,
-} from './FilamentDataSource'
+} from '../../services/FilamentDataSource'
 
 export class MockFilamentDataSource implements FilamentDataSource {
   private readonly readingListeners = new Set<ReadingListener>()

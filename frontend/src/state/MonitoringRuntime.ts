@@ -15,7 +15,7 @@ export class MonitoringRuntime {
 
     this.lifecycleGeneration += 1
     this.leaseCount += 1
-    if (this.leaseCount === 1) this.store.start()
+    if (this.leaseCount === 1) this.store.observe()
 
     let released = false
     return () => {
@@ -31,7 +31,7 @@ export class MonitoringRuntime {
           this.leaseCount === 0 &&
           this.lifecycleGeneration === releaseGeneration
         ) {
-          this.store.stop()
+          this.store.unobserve()
         }
       })
     }

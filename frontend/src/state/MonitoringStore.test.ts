@@ -103,6 +103,13 @@ function createFixture() {
 }
 
 describe('MonitoringStore', () => {
+  it('starts and stops each legacy fixture once per explicit lifecycle command', () => {
+    const { source, store } = createFixture()
+    expect(source.startCount).toBe(1)
+    store.stop()
+    expect(source.stopCount).toBe(1)
+    store.dispose()
+  })
   it('keeps Recent Trend bounded to the newest 300 readings', () => {
     const { source, store } = createFixture()
 

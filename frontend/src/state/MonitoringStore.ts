@@ -12,6 +12,8 @@ import {
   type AlarmEvent,
   type DiameterReading,
   type MonitoringConfiguration,
+  type BackendMeasurement, type BackendMeasurementRecord, type BackendEvent,
+  type BackendRecovery, type BackendState, type CameraPreview,
 } from '../domain/monitoring'
 import type { FilamentDataSource, Unsubscribe } from '../services/FilamentDataSource'
 
@@ -23,6 +25,14 @@ export interface LiveMonitoringSnapshot {
   connectionState: ConnectionState
   visionSourceState: VisionSourceState
   monitoringState: MonitoringState
+  latestBackendReading: BackendMeasurement | null
+  recentBackendTrend: readonly BackendMeasurementRecord[]
+  backendState: BackendState | null
+  preview: CameraPreview | null
+  reliableEvents: readonly BackendEvent[]
+  recoveredAlarms: readonly unknown[]
+  recoveredErrors: readonly unknown[]
+  recoveredSessions: readonly { id: string }[]
 }
 
 export interface AlarmHistorySnapshot {
@@ -44,6 +54,7 @@ export class MonitoringStore {
   private readonly configurationListeners = new Set<StoreListener>()
   private sourceUnsubscribe: Unsubscribe | null = null
   private sourceStateUnsubscribe: Unsubscribe | null = null
+  private backendUnsubscribes: Unsubscribe[] = []
   private started = false
   private disposed = false
   private alarmSequence = 0
@@ -72,6 +83,9 @@ export class MonitoringStore {
       connectionState: ConnectionState.DISCONNECTED,
       visionSourceState: VisionSourceState.STOPPED,
       monitoringState: MonitoringState.IDLE,
+      latestBackendReading: null, recentBackendTrend: Object.freeze([]), backendState: null,
+      preview: null, reliableEvents: Object.freeze([]), recoveredAlarms: Object.freeze([]),
+      recoveredErrors: Object.freeze([]), recoveredSessions: Object.freeze([]),
     }
   }
 
@@ -107,7 +121,12 @@ export class MonitoringStore {
   getConfigurationSnapshot = (): ConfigurationSnapshot =>
     this.configurationSnapshot
 
-  start(): void {
+  start(): void | Promise<void> {
+    this.observe()
+    if (this.source.observe) return this.source.start(this.configuration)
+  }
+
+  observe(): void {
     if (this.disposed) throw new Error('A disposed monitoring store cannot restart.')
     if (this.started) return
     this.started = true
@@ -121,31 +140,48 @@ export class MonitoringStore {
     this.sourceStateUnsubscribe = this.source.subscribeState((state) =>
       this.handleSourceState(state),
     )
-    this.source.start(this.configuration)
+    if (this.source.subscribeMeasurement) this.backendUnsubscribes.push(this.source.subscribeMeasurement(value => this.handleBackendMeasurement(value)))
+    if (this.source.subscribeBackendState) this.backendUnsubscribes.push(this.source.subscribeBackendState(value =>
+      this.replaceLiveSnapshot({ backendState: value, latestBackendReading: value.latestMeasurement })))
+    if (this.source.subscribePreview) this.backendUnsubscribes.push(this.source.subscribePreview(value => this.replaceLiveSnapshot({ preview: value })))
+    if (this.source.subscribeEvents) this.backendUnsubscribes.push(this.source.subscribeEvents(value => this.handleBackendEvent(value)))
+    if (this.source.subscribeRecovery) this.backendUnsubscribes.push(this.source.subscribeRecovery(value => this.handleRecovery(value)))
+    if (this.source.observe) this.source.observe(this.configuration)
+    else this.source.start(this.configuration) // Legacy deterministic test sources only.
   }
 
-  stop(): void {
+  stop(): void | Promise<void> {
+    this.unobserve()
+    if (this.source.unobserve) return this.source.stop()
+  }
+
+  unobserve(): void {
     if (!this.started) return
     this.started = false
     this.sourceUnsubscribe?.()
     this.sourceStateUnsubscribe?.()
     this.sourceUnsubscribe = null
     this.sourceStateUnsubscribe = null
-    this.source.stop()
+    for (const unsubscribe of this.backendUnsubscribes) unsubscribe()
+    this.backendUnsubscribes = []
+    if (this.source.unobserve) this.source.unobserve()
+    else this.source.stop() // Legacy deterministic test sources only.
     this.recoverActiveAlarm(Date.now())
     this.liveSnapshot = {
+      ...this.liveSnapshot,
       latestReading: null,
       recentTrend: Object.freeze([]),
       connectionState: ConnectionState.DISCONNECTED,
       visionSourceState: VisionSourceState.STOPPED,
       monitoringState: MonitoringState.IDLE,
+      preview: null,
     }
     this.notify(this.liveListeners)
   }
 
   dispose(): void {
     if (this.disposed) return
-    this.stop()
+    this.unobserve()
     this.disposed = true
     this.source.dispose()
     this.liveListeners.clear()
@@ -190,6 +226,34 @@ export class MonitoringStore {
     }
     this.notify(this.liveListeners)
     this.updateAlarmEpisode(reading)
+  }
+
+  private handleBackendMeasurement(value: BackendMeasurementRecord): void {
+    const readings = this.liveSnapshot.recentBackendTrend.filter(reading => reading.id !== value.id)
+    readings.push(value)
+    readings.sort((left, right) => left.measurement.timestamp - right.measurement.timestamp)
+    const trend = readings.slice(-this.configuration.recentTrendCapacity)
+    this.replaceLiveSnapshot({ recentBackendTrend: Object.freeze(trend), latestBackendReading: trend.at(-1)?.measurement ?? null })
+  }
+
+  private handleRecovery(value: BackendRecovery): void {
+    for (const reading of value.measurements) this.handleBackendMeasurement(reading)
+    this.replaceLiveSnapshot({ recoveredAlarms: mergeRecords(this.liveSnapshot.recoveredAlarms, value.alarms),
+      recoveredErrors: mergeRecords(this.liveSnapshot.recoveredErrors, value.errors),
+      recoveredSessions: mergeRecords(this.liveSnapshot.recoveredSessions, value.sessions) })
+  }
+
+  private handleBackendEvent(value: BackendEvent): void {
+    const changes: Partial<LiveMonitoringSnapshot> = {
+      reliableEvents: Object.freeze([...this.liveSnapshot.reliableEvents, value].slice(-300)),
+    }
+    if (value.type === 'alarm.transition') changes.recoveredAlarms = mergeRecords(this.liveSnapshot.recoveredAlarms, [value.payload])
+    if (value.type === 'error.raised') changes.recoveredErrors = mergeRecords(this.liveSnapshot.recoveredErrors, [value.payload])
+    if ((value.type === 'session.started' || value.type === 'session.finalized') && value.payload &&
+      typeof value.payload === 'object' && 'id' in value.payload && typeof value.payload.id === 'string') {
+      changes.recoveredSessions = mergeRecords(this.liveSnapshot.recoveredSessions, [value.payload as { id: string }])
+    }
+    this.replaceLiveSnapshot(changes)
   }
 
   private handleSourceState(state: VisionSourceState): void {
@@ -305,6 +369,15 @@ export class MonitoringStore {
   private notify(listeners: ReadonlySet<StoreListener>): void {
     for (const listener of listeners) listener()
   }
+}
+
+function mergeRecords<T>(current: readonly T[], incoming: readonly T[]): readonly T[] {
+  const records = new Map<unknown, T>()
+  for (const value of [...current, ...incoming]) {
+    const id = value && typeof value === 'object' && 'id' in value ? value.id : value
+    records.set(id, value)
+  }
+  return Object.freeze([...records.values()].slice(-300))
 }
 
 function isDiameterAlarmStatus(

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { DEFAULT_MONITORING_CONFIGURATION } from '../config/monitoringConfig'
-import { MeasurementStatus, VisionSourceState } from '../domain/monitoring'
+import { DEFAULT_MONITORING_CONFIGURATION } from '../../config/monitoringConfig'
+import { MeasurementStatus, VisionSourceState } from '../../domain/monitoring'
 import { MockFilamentDataSource } from './MockFilamentDataSource'
 
 describe('MockFilamentDataSource', () => {

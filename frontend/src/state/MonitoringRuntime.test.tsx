@@ -7,7 +7,7 @@ import {
   type ConfigurationStorage,
 } from '../config/monitoringConfig'
 import type { MonitoringConfiguration } from '../domain/monitoring'
-import { MockFilamentDataSource } from '../services/MockFilamentDataSource'
+import { MockFilamentDataSource } from '../test/fixtures/MockFilamentDataSource'
 import { MonitoringRuntime } from './MonitoringRuntime'
 import { MonitoringStore } from './MonitoringStore'
 import { useLiveMonitoring } from './useMonitoringStore'
@@ -25,6 +25,19 @@ class MemoryConfigurationStorage implements ConfigurationStorage {
 }
 
 describe('MonitoringRuntime under React StrictMode', () => {
+  it('acquires and releases observers without issuing Backend producer commands', async () => {
+    const source = new MockFilamentDataSource()
+    Object.assign(source, { observe: vi.fn(), unobserve: vi.fn() })
+    const start = vi.spyOn(source, 'start')
+    const stop = vi.spyOn(source, 'stop')
+    const store = new MonitoringStore(source, new MemoryConfigurationStorage())
+    const runtime = new MonitoringRuntime(store)
+    const release = runtime.acquire()
+    expect(start).not.toHaveBeenCalled()
+    release(); await Promise.resolve()
+    expect(stop).not.toHaveBeenCalled()
+    runtime.dispose()
+  })
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000)

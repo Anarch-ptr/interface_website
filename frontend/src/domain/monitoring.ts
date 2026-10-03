@@ -70,6 +70,45 @@ export interface DiameterReading {
   status: MeasurementStatus
 }
 
+// Neutral transport state consumed by the Backend source; the legacy reading
+// above is retained only until the separately scheduled dashboard migration.
+export interface BackendMeasurement {
+  evidence: readonly { cameraId: string; timestamp: number; sequence: number;
+    pixelWidth: number | null; diameterMm: number | null; confidence: number | null;
+    valid: boolean; source: string }[]
+  diameterMm: number | null
+  confidence: number | null
+  status: string
+  timestamp: number
+}
+
+export interface BackendMeasurementRecord {
+  id: string
+  sessionId: string
+  appliedRevision?: number | null
+  measurement: BackendMeasurement
+}
+
+export interface BackendSession { id: string; startedAt?: number; endedAt?: number | null }
+export interface BackendEvent {
+  type: string; sequence: number; deviceId: string; occurredAt: number; payload: unknown
+}
+export interface BackendRecovery {
+  sequence: number
+  complete: boolean
+  sessions: BackendSession[]
+  measurements: BackendMeasurementRecord[]
+  alarms: unknown[]
+  errors: unknown[]
+}
+export interface BackendState {
+  deviceId: string; connection: string; monitoring: string; eventSequence: number
+  session: BackendSession | null; latestMeasurement: BackendMeasurement | null
+}
+export interface CameraPreview {
+  url: string; width: number; height: number; timestamp: number; sourceSequence: number
+}
+
 export const AlarmDirection = {
   HIGH: 'HIGH',
   LOW: 'LOW',
