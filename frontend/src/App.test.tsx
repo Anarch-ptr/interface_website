@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
@@ -8,6 +8,9 @@ import {
   type ConfigurationStorage,
 } from './config/monitoringConfig'
 import { createDiameterReading } from './domain/measurement'
+import { defaultUdpProfiles } from './config/udpInputProfile'
+import { BackendApiClient } from './services/BackendApiClient'
+import type { CameraId, UdpConfigurationState, UdpDiagnostics } from './domain/udpInput'
 import {
   VisionSourceState,
   type DiameterReading,
@@ -79,12 +82,12 @@ class TestSource implements FilamentDataSource {
   }
 }
 
-function createFixture() {
+function createFixture(api?: BackendApiClient) {
   const source = new TestSource()
   const storage = new MemoryConfigurationStorage()
   const store = new MonitoringStore(source, storage)
   const runtime = new MonitoringRuntime(store)
-  const view = render(<App store={store} runtime={runtime} />)
+  const view = render(<App store={store} runtime={runtime} api={api} />)
   return { source, storage, store, runtime, view }
 }
 
@@ -109,6 +112,52 @@ function emitDiameter(
 }
 
 describe('FilamentVision application', () => {
+  // Migration targets: Tasks 22/23 must intentionally replace these baseline labels.
+  it('characterizes dual and fake production labels scheduled for removal', async () => {
+    const { source, runtime, view } = createFixture()
+    try {
+      assertMigrationTargetLabels()
+      emitDiameter(source, 1.75, 1_000)
+      expect(screen.getByText('Camera A')).toBeVisible()
+      expect(screen.getByText('Camera B')).toBeVisible()
+      expect(screen.getByText('98%')).toBeVisible()
+      expect(screen.getByText('97%')).toBeVisible()
+      expect(screen.getByText('View difference')).toBeVisible()
+      expect(screen.getByText('0.002 mm')).toBeVisible()
+    } finally {
+      view.unmount()
+      await act(async () => Promise.resolve())
+      runtime.dispose()
+    }
+  })
+
+  it('characterizes the two UDP cards and obsolete transport controls as migration targets', async () => {
+    const api = udpApiFixture()
+    const user = userEvent.setup()
+    const { runtime, view } = createFixture(api)
+    try {
+      await user.click(screen.getByRole('button', { name: 'Settings' }))
+      await screen.findByRole('heading', { name: 'UDP Input Settings' })
+      expect(screen.getByText('CAMERA A')).toBeVisible()
+      expect(screen.getByText('CAMERA B')).toBeVisible()
+      expect(screen.getByLabelText('Camera A Listen Port')).toHaveValue(5101)
+      expect(screen.getByLabelText('Camera B Listen Port')).toHaveValue(5102)
+      for (const camera of ['A', 'B']) {
+        const transport = screen.getByLabelText(`Camera ${camera} Transport Mode`)
+        expect(within(transport).getByRole('option', { name: 'Single Datagram' })).toBeInTheDocument()
+        const payload = screen.getByLabelText(`Camera ${camera} Payload Format`)
+        expect(within(payload).getByRole('option', { name: 'DIAMETER' })).toBeInTheDocument()
+      }
+      expect(screen.getAllByText('Advanced UDP Framing')).toHaveLength(2)
+      await user.selectOptions(screen.getByLabelText('Camera B Payload Format'), 'DIAMETER')
+      expect(screen.getByText('Fusion confidence is a Backend default weight, not device-reported confidence.')).toBeVisible()
+    } finally {
+      view.unmount()
+      await act(async () => Promise.resolve())
+      runtime.dispose()
+    }
+  })
+
   it('presents live system health and records out-of-tolerance alarms as Critical', async () => {
     const user = userEvent.setup()
     const { source, runtime, view } = createFixture()
@@ -174,3 +223,32 @@ describe('FilamentVision application', () => {
     runtime.dispose()
   })
 })
+
+function assertMigrationTargetLabels(): void {
+  for (const label of [
+    'Dual-view diameter monitor',
+    'Fused dual-camera measurement with live deviation analysis.',
+    'DUAL-VIEW QUALITY',
+    'Fused measurement',
+    'SIMULATION',
+    'Local monitoring source',
+    'Live simulation',
+  ]) {
+    expect(screen.getByText(label)).toBeVisible()
+  }
+}
+
+function udpApiFixture(): BackendApiClient {
+  // Keep App/Settings real; isolate only the remote API boundary to deterministic data.
+  return new class extends BackendApiClient {
+    override async getUdpConfiguration(): Promise<UdpConfigurationState> {
+      return { savedRevision: 1, appliedRevision: 1, configuration: defaultUdpProfiles() }
+    }
+
+    override async getUdpDiagnostics(_device: string, camera: CameraId): Promise<UdpDiagnostics> {
+      return { cameraId: camera, transportMode: 'STRUCTURED_CHUNKED', datagramsReceived: 0,
+        bytesReceived: 0, framesCompleted: 0, framesDropped: 0, invalidHeader: 0,
+        invalidFooter: 0, invalidPayloadSize: 0, decodeFailures: 0, sourceFilteredDatagrams: 0 }
+    }
+  }()
+}
