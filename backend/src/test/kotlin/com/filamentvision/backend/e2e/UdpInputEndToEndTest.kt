@@ -6,9 +6,19 @@ import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.runtime.*
 import com.filamentvision.backend.input.transport.StructuredTransportCodec
 import com.filamentvision.backend.input.transport.StructuredTransportHeader
+import com.filamentvision.backend.input.transport.EpochClock
 import com.filamentvision.core.event.DomainEvent
 import com.filamentvision.core.event.EventReplay
+import com.filamentvision.core.frame.*
+import com.filamentvision.core.input.CameraInput
+import com.filamentvision.core.runtime.MonitoringLifecycle
 import java.net.DatagramSocket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import org.junit.Assert.*
@@ -18,6 +28,103 @@ import org.junit.rules.TemporaryFolder
 
 class UdpInputEndToEndTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun cancellationAfterPreviewReleasesDecodedPermitBeforeRestart() = runBlocking {
+        val previewed = CompletableDeferred<Unit>()
+        val resumeHandoff = CountDownLatch(1)
+        val pauseOnce = AtomicBoolean(true)
+        val composition = AtomicReference<BackendComposition>()
+        val c = BackendComposition.open(temporary.root.toPath().resolve("cancel-handoff.db"),
+            temporary.root.toPath().resolve("cancel-handoff-objects"),
+            // Keep the real UDP source clock independent of the tap's deterministic handoff gate.
+            inputSourceFactory = BackendInputSourceFactory { _, _, epoch, _, profile ->
+                RaspberryPiUdpInputSource(profile, epochClock = EpochClock(epoch))
+            }, monotonicMillis = {
+                if (composition.get()?.previews?.metrics?.publishedFrames == 1L && pauseOnce.compareAndSet(true, false)) {
+                    previewed.complete(Unit)
+                    check(resumeHandoff.await(5, TimeUnit.SECONDS)) { "Handoff gate was not released" }
+                }
+                System.nanoTime() / 1_000_000
+            })
+        composition.set(c)
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        val port = freePort()
+        try {
+            apply(c, profile(port))
+            c.application.start(c.deviceId, "start", null, null)
+            UdpTestSender().use { sender ->
+                send(sender, port, 1)
+                withTimeout(5000) { previewed.await() }
+                assertEquals(0, source.pendingInputCount)
+                assertEquals(0L, c.runtime.state.value.statistics.sampleCount)
+                val stopping = async { c.application.stop(c.deviceId, "stop") }
+                await { source.activeProducerCount == 0 } // Finalizer cancels the worker before stopping the source.
+                resumeHandoff.countDown()
+                withTimeout(5000) { stopping.await() }
+                assertEquals(0L, c.runtime.state.value.statistics.sampleCount)
+
+                c.application.start(c.deviceId, "restart", null, null)
+                send(sender, port, 2)
+                await { source.udpDiagnostics().let { it.framesCompleted == 2L || it.processingBackpressureDrops > 0 } }
+                assertEquals("Cancelled tap must release the caller-owned decoded frame", 0L,
+                    source.udpDiagnostics().processingBackpressureDrops)
+                await { c.runtime.state.value.statistics.sampleCount == 1L }
+                assertEquals(1.75, c.application.latest(c.deviceId)!!.measurement.diameterMm, 1e-9)
+                assertEquals(2L, source.udpDiagnostics().framesCompleted)
+                assertEquals(1, source.activeProducerCount)
+                assertEquals(1, source.activeReceiverCount)
+            }
+        } finally { resumeHandoff.countDown(); c.close() }
+    }
+
+    @Test fun previewFailureReleasesDecodedPermitBeforeRestart() = runBlocking {
+        val c = open("preview-failure")
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        val port = freePort()
+        try {
+            apply(c, profile(port))
+            c.application.start(c.deviceId, "start", null, null)
+            c.previews.close() // Force the real publisher to throw before the Runtime receives the frame.
+            UdpTestSender().use { sender ->
+                send(sender, port, 1)
+                await { c.runtime.state.value.lifecycle == MonitoringLifecycle.ERROR }
+                assertEquals(0L, c.runtime.state.value.statistics.sampleCount)
+                assertEquals(0, source.activeProducerCount)
+                c.application.start(c.deviceId, "restart", null, null)
+                send(sender, port, 2)
+                await { source.udpDiagnostics().let { it.framesCompleted == 2L || it.processingBackpressureDrops > 0 } }
+                assertEquals("A preview exception must release the decoded frame", 0L,
+                    source.udpDiagnostics().processingBackpressureDrops)
+                await { c.runtime.state.value.lifecycle == MonitoringLifecycle.ERROR }
+                assertEquals(2L, source.udpDiagnostics().framesCompleted)
+                assertEquals(2, c.application.errors(null).size)
+            }
+        } finally { c.close() }
+    }
+
+    @Test fun frameLeaseIsReleasedOnceOnlyAfterSynchronousVisionAcceptsIt() = runBlocking {
+        val c = open("lease-order")
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        val releases = AtomicInteger()
+        val samplesAtRelease = AtomicLong(-1)
+        val frame = CameraFrame(CameraId("camera"), 1000, 1000, 48, 8, PixelFormat.ARGB32,
+            PixelBuffer.ints(IntArray(48 * 8) { if (it % 48 in 6 until 41) 0xff141414.toInt() else 0xffc8c8c8.toInt() }),
+            0, false, 1, lease = FrameLease {
+                samplesAtRelease.set(c.runtime.state.value.statistics.sampleCount)
+                releases.incrementAndGet()
+            })
+        try {
+            apply(c, profile(freePort()))
+            c.application.start(c.deviceId, "start", null, null)
+            source.offerInput(CameraInput.Image(frame))
+            await { releases.get() > 0 }
+            assertEquals(1L, samplesAtRelease.get())
+            assertEquals(1.75, c.application.latest(c.deviceId)!!.measurement.diameterMm, 1e-9)
+            c.application.stop(c.deviceId, "stop")
+            frame.close()
+            assertEquals(1, releases.get())
+        } finally { c.close(); frame.close() }
+    }
 
     @Test fun outOfOrderPiImagesProduceOneNeutralPreviewAndReliableDurableEvents() = runBlocking {
         val port = freePort()

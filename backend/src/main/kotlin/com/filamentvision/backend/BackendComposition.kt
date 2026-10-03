@@ -68,13 +68,19 @@ class BackendComposition private constructor(
     private val tap = object : CameraInputSource by inputSource {
         override val inputs = flow {
             inputSource.inputs.collect { input ->
-                val key = MetricsCameraKey(deviceId, input.cameraId)
-                metrics.received(key)
-                if (input is CameraInput.Image) previewPublisher.tryPublish(input.frame)
-                val started = monotonicMillis()
-                emit(input)
-                metrics.processed(key)
-                metrics.latency(MetricLatency.PROCESSING, (monotonicMillis() - started).coerceAtLeast(0).toDouble())
+                try {
+                    val key = MetricsCameraKey(deviceId, input.cameraId)
+                    metrics.received(key)
+                    if (input is CameraInput.Image) previewPublisher.tryPublish(input.frame)
+                    val started = monotonicMillis()
+                    emit(input)
+                    metrics.processed(key)
+                    metrics.latency(MetricLatency.PROCESSING, (monotonicMillis() - started).coerceAtLeast(0).toDouble())
+                } finally {
+                    // The source transferred ownership before preview/emit can fail. Downstream
+                    // consumes synchronously; its own close and this fallback are idempotent.
+                    if (input is CameraInput.Image) input.frame.close()
+                }
             }
         }
     }
