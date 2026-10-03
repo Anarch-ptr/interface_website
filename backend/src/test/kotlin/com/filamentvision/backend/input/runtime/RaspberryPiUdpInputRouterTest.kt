@@ -217,17 +217,22 @@ internal suspend fun task16Failure(action: suspend () -> Unit): Throwable {
 }
 
 /** Only the operating system socket is substituted; receiver loop, processor and frame ownership are real. */
-internal open class Task16SourceHarness(profile: RaspberryPiUdpInputProfile = task16Profile()) {
+internal open class Task16SourceHarness(
+    profile: RaspberryPiUdpInputProfile = task16Profile(),
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
     val channels = mutableListOf<Task16Channel>()
     var failNextBind = false
     var failCompilation = false
+    var onOpen: (Task16Channel) -> Unit = {}
     val source = RaspberryPiUdpInputSource(profile,
+        dispatcher = dispatcher,
         ipv4Resolver = BackendIpv4Resolver(Ipv4NetworkInterfaceProvider {
             listOf("wifi", "ethernet").map { Ipv4NetworkInterfaceEntry(it, it, "192.0.2.20", true, false, false, true, 1) }
         }),
         channelFactory = UdpChannelFactory {
             check(channels.none { it.isOpen || it.receiving }) { "Second receiver opened before previous receiver joined" }
-            Task16Channel(failNextBind.also { failNextBind = false }).also { channels += it }
+            Task16Channel(failNextBind.also { failNextBind = false }).also { channels += it; onOpen(it) }
         }, compiledFactory = { p, observer ->
             check(!failCompilation) { "compile failure" }
             CompiledRaspberryPiInputProfile.compile(p, observer)

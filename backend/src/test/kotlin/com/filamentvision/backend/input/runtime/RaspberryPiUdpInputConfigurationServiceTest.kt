@@ -8,6 +8,7 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import kotlin.coroutines.CoroutineContext
 
 class RaspberryPiUdpInputConfigurationServiceTest {
     @get:Rule val temporary = TemporaryFolder()
@@ -153,20 +154,115 @@ class RaspberryPiUdpInputConfigurationServiceTest {
         } finally { f.close() }
     }
 
-    private suspend fun fixture(): ServiceFixture {
+    @Test fun parserOnlyCasConflictRebindsReceiverThatFailedWhilePersistenceWasPending() = runBlocking {
+        val f = fixture()
+        try {
+            f.packet(task16Wire(7, index = 0, count = 2, payload = byteArrayOf(7), total = 2))
+            val next = f.service.save(2, f.initial.copy(transportLimits = f.initial.transportLimits.copy(maxChunkPayloadBytes = 9)))
+            f.beforeMark = {
+                f.failCurrentReceiver()
+                f.repository.save(3, next.profile.copy(listenPort = 46012))
+            }
+            assertEquals(RaspberryPiUdpApplyOutcome.CONFLICT, f.service.apply(3).outcome)
+            f.assertApplied(2, f.initial)
+            f.assertSingleOwner()
+            assertEquals(listOf(46010, 46010), f.boundPorts())
+            assertEquals(UdpOperationalStatus.UDP_READY, f.source.operationalStatus().status)
+            assertNull(f.source.diagnostics.value.lastError)
+            f.packet(task16Wire(7, index = 1, count = 2, payload = byteArrayOf(8), total = 2))
+            val restored = f.take()
+            assertEquals(0xff070707.toInt(), restored.frame.pixels[0]); restored.frame.close()
+            assertEquals(1L, f.source.totalProducerStarts)
+        } finally { f.close() }
+    }
+
+    @Test fun parserOnlyPersistenceExceptionRebindsReceiverThatFailedWhilePersistenceWasPending() = runBlocking {
+        val f = fixture()
+        try {
+            f.service.save(2, f.initial.copy(envelope = DatagramEnvelopeProfile("BB 02", "0E 0B")))
+            val failure = IllegalStateException("storage unavailable after receiver failure")
+            f.beforeMark = { f.failCurrentReceiver(); throw failure }
+            val thrown = task16Failure { f.service.apply(3) }
+            assertEquals(IllegalStateException::class.java, thrown.javaClass)
+            assertSame(failure, generateSequence(thrown) { it.cause }.last())
+            f.assertApplied(2, f.initial)
+            f.assertSingleOwner()
+            assertEquals(listOf(46010, 46010), f.boundPorts())
+            assertEquals(UdpOperationalStatus.UDP_READY, f.source.operationalStatus().status)
+            assertNull(f.source.diagnostics.value.lastError)
+            f.packet(task16Wire(1, payload = byteArrayOf(7, 8)))
+            f.take().frame.close()
+        } finally { f.close() }
+    }
+
+    @Test fun failedRebindAfterParserOnlyReceiverFailureLatchesFatalConsistencyError() = runBlocking {
+        val f = fixture()
+        try {
+            val next = f.service.save(2, f.initial.copy(transportLimits = f.initial.transportLimits.copy(maxChunkPayloadBytes = 9)))
+            f.beforeMark = {
+                f.failCurrentReceiver()
+                f.failNextBind = true
+                f.repository.save(3, next.profile.copy(listenPort = 46012))
+            }
+            val fatal = task16Failure { f.service.apply(3) }
+            assertTrue(fatal is RaspberryPiUdpConsistencyException)
+            assertEquals(2L, f.repository.state().applied.revision)
+            assertEquals(2L, f.router.appliedRevision)
+            assertEquals(ImageInputState.ERROR, f.source.state.value)
+            assertEquals("UDP_APPLY_CONSISTENCY_FAILURE", f.source.diagnostics.value.lastError)
+            assertEquals(0, f.source.activeReceiverCount)
+            assertTrue(task16Failure { f.source.start() } is RaspberryPiUdpConsistencyException)
+            assertTrue(task16Failure { f.service.apply(3) } is RaspberryPiUdpConsistencyException)
+        } finally { f.close() }
+    }
+
+    @Test fun immediateReceiveFailureDuringCompensationCannotBeOverwrittenWithOldRunningState() = runBlocking {
+        for (parserOnly in listOf(true, false)) {
+            val dispatcher = ControlledDispatch()
+            val f = fixture(dispatcher)
+            try {
+                val candidate = if (parserOnly) f.initial.copy(envelope = DatagramEnvelopeProfile("BB 02", "0E 0B"))
+                    else f.initial.copy(listenPort = 46011)
+                f.service.save(2, candidate)
+                val persistence = IllegalStateException("storage unavailable")
+                f.beforeMark = {
+                    if (parserOnly) f.failCurrentReceiver()
+                    f.onOpen = { socket ->
+                        socket.failReceive()
+                        // The next receiver launch runs to its injected failure before start returns.
+                        dispatcher.runInline = true
+                    }
+                    throw persistence
+                }
+                val fatal = task16Failure { f.service.apply(3) }
+                assertTrue("parserOnly=$parserOnly: $fatal", fatal is RaspberryPiUdpConsistencyException)
+                assertSame(persistence, fatal.cause)
+                assertEquals(1, fatal.suppressed.size)
+                assertEquals(2L, f.repository.state().applied.revision)
+                assertEquals(ImageInputState.ERROR, f.source.state.value)
+                assertEquals("UDP_APPLY_CONSISTENCY_FAILURE", f.source.diagnostics.value.lastError)
+                assertEquals(0, f.source.activeReceiverCount)
+                assertEquals(0, f.channels.count { it.isOpen })
+                assertTrue(task16Failure { f.service.save(3, f.initial) } is RaspberryPiUdpConsistencyException)
+            } finally { f.close() }
+        }
+    }
+
+    private suspend fun fixture(dispatcher: CoroutineDispatcher = Dispatchers.IO): ServiceFixture {
         val database = SqliteDatabase(temporary.newFile("input-${System.nanoTime()}.db").toPath())
         val repository = SqliteRaspberryPiUdpInputProfileRepository(database)
         val initial = task16Profile()
         repository.save(1, initial)
         check(repository.markApplied(1, 2))
-        return ServiceFixture(database, repository, initial).also { it.source.start() }
+        return ServiceFixture(database, repository, initial, dispatcher).also { it.source.start() }
     }
 
     private class ServiceFixture(
         private val database: SqliteDatabase,
         val repository: RaspberryPiUdpInputProfileRepository,
         val initial: RaspberryPiUdpInputProfile,
-    ) : Task16SourceHarness(initial) {
+        dispatcher: CoroutineDispatcher,
+    ) : Task16SourceHarness(initial, dispatcher) {
         var beforeMark: suspend () -> Unit = {}
         val repositoryWithHook = object : RaspberryPiUdpInputProfileRepository by repository {
             override suspend fun markApplied(expectedAppliedRevision: Long, revision: Long): Boolean {
@@ -186,5 +282,18 @@ class RaspberryPiUdpInputConfigurationServiceTest {
             assertEquals(ImageInputState.RUNNING, source.state.value)
         }
         suspend fun close() { source.stop(); database.close() }
+        suspend fun failCurrentReceiver() {
+            channels.last().failReceive()
+            withTimeout(3000) { while (source.state.value != ImageInputState.ERROR || source.activeReceiverCount != 0) delay(2) }
+        }
+    }
+
+    private class ControlledDispatch : CoroutineDispatcher() {
+        @Volatile var runInline = false
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            if (runInline) {
+                block.run()
+            } else Dispatchers.IO.dispatch(context, block)
+        }
     }
 }

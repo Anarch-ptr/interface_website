@@ -33,6 +33,7 @@ class RaspberryPiUdpInputSource(
     private val lifecycle = Mutex()
     private val processingLock = Mutex()
     private val mailboxLock = Any()
+    private val receiverStatusLock = Any()
     // Caller-owned frames may outlive a processor or receiver lifecycle.
     private val decodedPermit = DecodedFramePermit()
     @Volatile private var profile = profile
@@ -180,12 +181,13 @@ class RaspberryPiUdpInputSource(
                 val oldProcessor = processor
                 val oldReceiver = receiver
                 val oldCapacity = oldReceiver?.receiveCapacity
-                val oldReceiverRunning = oldReceiver?.isRunning == true
                 val oldActivity = activity
-                val oldState = mutableState.value
-                val oldDiagnostics = mutableDiagnostics.value
+                val (oldState, oldDiagnostics) = synchronized(receiverStatusLock) {
+                    mutableState.value to mutableDiagnostics.value
+                }
                 val oldAdmitting = synchronized(mailboxLock) { admitting }
                 val active = activeProducerCount == 1
+                val oldReceiverRequired = active && oldProfile.enabled && oldState == ImageInputState.RUNNING
                 val restart = oldProfile.enabled != next.enabled || oldProfile.networkInterface != next.networkInterface ||
                     oldProfile.listenPort != next.listenPort || oldProfile.raspberryPiIpv4 != next.raspberryPiIpv4
                 var committed = false
@@ -222,10 +224,35 @@ class RaspberryPiUdpInputSource(
                     processor = oldProcessor
                     receiver = oldReceiver
                     if (oldCapacity != null) oldReceiver.updateReceiveCapacity(oldCapacity)
-                    activity = oldActivity
-                    if (restart && oldReceiverRunning) oldReceiver!!.start()
-                    mutableState.value = oldState
-                    mutableDiagnostics.value = oldDiagnostics
+                    // A parser-only swap keeps its socket, but that socket can fail while the CAS waits.
+                    // Serialize the health check/status restoration with onFailure so ERROR cannot be erased.
+                    val restoreReceiver = synchronized(receiverStatusLock) {
+                        if (oldReceiverRequired && (oldReceiver?.isRunning != true || !oldReceiver.isSocketOpen)) {
+                            true
+                        } else {
+                            activity = oldActivity
+                            mutableState.value = oldState
+                            mutableDiagnostics.value = oldDiagnostics
+                            false
+                        }
+                    }
+                    if (restoreReceiver) {
+                        checkNotNull(oldReceiver) { "UDP_ROLLBACK_RECEIVER_MISSING" }
+                        oldReceiver.stop() // Join a failed loop before reopening, including parser-only rollback.
+                        synchronized(receiverStatusLock) {
+                            activity = UdpActivity().also { it.reset(true) }
+                            mutableState.value = ImageInputState.STARTING
+                        }
+                        oldReceiver.start()
+                        synchronized(receiverStatusLock) {
+                            check(oldReceiver.isRunning && oldReceiver.isSocketOpen && mutableState.value == ImageInputState.STARTING) {
+                                "UDP_ROLLBACK_RECEIVER_NOT_RUNNING"
+                            }
+                            activity.bound(monotonicClock.nowNanos())
+                            mutableState.value = oldState
+                            mutableDiagnostics.value = oldDiagnostics
+                        }
+                    }
                     synchronized(mailboxLock) { admitting = oldAdmitting }
                 } catch (compensation: Throwable) {
                     val fatal = RaspberryPiUdpConsistencyException(failure ?: IllegalStateException("UDP_APPLY_CAS_CONFLICT"), compensation)
@@ -267,9 +294,11 @@ class RaspberryPiUdpInputSource(
                 udp.datagramTooLargeOrTruncated()
             }
             override fun onFailure(error: Throwable) {
-                activity.reset(false)
-                mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = "UDP_RECEIVE_FAILED")
-                mutableState.value = ImageInputState.ERROR
+                synchronized(receiverStatusLock) {
+                    activity.reset(false)
+                    mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = "UDP_RECEIVE_FAILED")
+                    mutableState.value = ImageInputState.ERROR
+                }
             }
         }, channelFactory = channelFactory, monotonicClock = monotonicClock, epochClock = epochClock,
             dispatcher = dispatcher, envelopeBytes = 4, bindIpv4 = bindIpv4,
