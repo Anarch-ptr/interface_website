@@ -56,7 +56,11 @@ class TransportDatagramParser(
 ) {
     /** Single-stream production policy; the reserved v1 byte must be 1. */
     fun parse(bytes: ByteArray, length: Int, limits: TransportLimits): TransportParseResult =
-        parseWithPolicy(bytes, length, null, limits)
+        parseWithPolicy(bytes, 0, length, null, limits)
+
+    /** Neutral policy over a synchronous borrowed range, including stripped envelopes. */
+    fun parse(bytes: ByteArray, offset: Int, length: Int, limits: TransportLimits): TransportParseResult =
+        parseWithPolicy(bytes, offset, length, null, limits)
 
     /** Legacy expected-camera adapter retained until its callers migrate. */
     fun parse(
@@ -64,22 +68,23 @@ class TransportDatagramParser(
         length: Int,
         expectedCamera: UdpCameraId,
         limits: TransportLimits,
-    ): TransportParseResult = parseWithPolicy(bytes, length, expectedCamera, limits)
+    ): TransportParseResult = parseWithPolicy(bytes, 0, length, expectedCamera, limits)
 
     private fun parseWithPolicy(
         bytes: ByteArray,
+        offset: Int,
         length: Int,
         expectedCamera: UdpCameraId?,
         limits: TransportLimits,
     ): TransportParseResult {
-        if (length !in StructuredTransportCodec.HEADER_BYTES..bytes.size) {
+        if (offset < 0 || length < StructuredTransportCodec.HEADER_BYTES || offset > bytes.size - length) {
             return rejected(TransportErrorCode.INVALID_TRANSPORT_HEADER, "Datagram is shorter than the transport header")
         }
-        if (!StructuredTransportCodec.hasMagic(bytes, 0)) {
+        if (!StructuredTransportCodec.hasMagic(bytes, offset)) {
             return rejected(TransportErrorCode.INVALID_TRANSPORT_HEADER, "Transport magic does not match FVU1")
         }
-        val buffer = ByteBuffer.wrap(bytes, 0, length).order(ByteOrder.BIG_ENDIAN)
-        buffer.position(4)
+        val buffer = ByteBuffer.wrap(bytes, offset, length).order(ByteOrder.BIG_ENDIAN)
+        buffer.position(offset + 4)
         val version = buffer.get().toInt() and 0xff
         if (version != 1) {
             return rejected(TransportErrorCode.UNSUPPORTED_PROTOCOL_VERSION, "Unsupported transport protocol version")
@@ -146,7 +151,7 @@ class TransportDatagramParser(
         return TransportParseResult.Accepted(
             ParsedTransportDatagram(
                 header,
-                payloadViewFactory.create(bytes, headerLength, payloadLength),
+                payloadViewFactory.create(bytes, offset + headerLength, payloadLength),
             ),
         )
     }

@@ -207,7 +207,7 @@ class StructuredChunkFrameReassembler(
 
     private companion object {
         const val HARD_MAX_FRAME_BYTES = 32L * 1024 * 1024
-        const val HARD_MAX_CHUNK_COUNT = 8_192
+        const val HARD_MAX_CHUNK_COUNT = 65_535
         const val HARD_MAX_BUFFERED_BYTES = 64L * 1024 * 1024
     }
 }
