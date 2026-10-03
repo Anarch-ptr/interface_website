@@ -9,6 +9,7 @@ import com.filamentvision.backend.input.reassembly.*
 import com.filamentvision.backend.input.transport.BorrowedDatagramBytes
 import com.filamentvision.backend.input.transport.TransportParseResult
 import com.filamentvision.core.frame.CameraId
+import com.filamentvision.core.frame.FrameLease
 import com.filamentvision.core.input.CameraInput
 import java.net.InetSocketAddress
 
@@ -32,8 +33,13 @@ sealed interface ProcessorResult {
 }
 
 /** Confined to the receive callback thread; borrowed bytes never escape [process]. */
-class RaspberryPiUdpProcessor(private val compiled: CompiledRaspberryPiInputProfile) {
+class RaspberryPiUdpProcessor(
+    private val compiled: CompiledRaspberryPiInputProfile,
+    private val decodedPermit: DecodedFramePermit = DecodedFramePermit(),
+) {
     private var sequence = 0L
+    var processingBackpressureDrops = 0L
+        private set
 
     val inFlightFrameCount: Int get() = compiled.reassembler.inFlightFrameCount
     val bufferedReassemblyBytes: Long get() = compiled.reassembler.bufferedBytes
@@ -74,16 +80,29 @@ class RaspberryPiUdpProcessor(private val compiled: CompiledRaspberryPiInputProf
     }
 
     private fun decode(frame: CompletedFrame): ProcessorResult {
-        val decoded = compiled.decoder.decode(frame.payload)
-        if (decoded is PayloadDecodeResult.Failure) return rejected(RaspberryPiProcessingStage.DECODER, decoded.error.name)
-        val image = (decoded as PayloadDecodeResult.Success).value as DecodedInput.Image
-        return ProcessorResult.Accepted(
-            CameraInput.Image(DecodedFrameAdapter.toFrame(
-                image.image, CameraId("camera"), frame.receivedAtEpochMillis,
-                frame.receivedAtMonotonicNanos, ++sequence,
-            )),
-            frame.source, frame.sourceTimestampMicros, frame.completedAtMonotonicNanos,
-        )
+        val lease = decodedPermit.tryAcquire() ?: run {
+            processingBackpressureDrops++
+            return rejected(RaspberryPiProcessingStage.REASSEMBLY, "PROCESSING_BACKPRESSURE")
+        }
+        var transferred = false
+        try {
+            val decoded = compiled.decoder.decode(frame.payload)
+            if (decoded is PayloadDecodeResult.Failure) return rejected(RaspberryPiProcessingStage.DECODER, decoded.error.name)
+            val image = (decoded as PayloadDecodeResult.Success).value as DecodedInput.Image
+            val result = ProcessorResult.Accepted(
+                CameraInput.Image(DecodedFrameAdapter.toFrame(
+                    image.image, CameraId("camera"), frame.receivedAtEpochMillis,
+                    frame.receivedAtMonotonicNanos, sequence + 1,
+                    lease = FrameLease(lease::close),
+                )),
+                frame.source, frame.sourceTimestampMicros, frame.completedAtMonotonicNanos,
+            )
+            sequence++
+            transferred = true
+            return result
+        } finally {
+            if (!transferred) lease.close()
+        }
     }
 
     private fun rejected(stage: RaspberryPiProcessingStage, reason: String) = ProcessorResult.Rejected(stage, reason)

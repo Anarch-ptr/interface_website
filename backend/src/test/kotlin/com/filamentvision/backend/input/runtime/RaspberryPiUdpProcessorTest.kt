@@ -1,6 +1,7 @@
 package com.filamentvision.backend.input.runtime
 
-import com.filamentvision.backend.input.decoder.PayloadDecoder
+import com.filamentvision.backend.input.decoder.*
+import com.filamentvision.backend.adapter.DecodedImage
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.transport.*
 import org.junit.Assert.*
@@ -8,10 +9,90 @@ import org.junit.Test
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
+import java.util.concurrent.CancellationException
 import javax.imageio.ImageIO
 
 class RaspberryPiUdpProcessorTest {
     private val source = InetSocketAddress("192.0.2.10", 9_000)
+
+    @Test fun occupiedPermitDropsCompletedEncodedFrameBeforeDecoderAndReusesAfterClose() {
+        var decodes = 0
+        val compiled = CompiledRaspberryPiInputProfile.compile(profile())
+        val processor = RaspberryPiUdpProcessor(withDecoder(compiled, PayloadDecoder {
+            decodes++; compiled.decoder.decode(it)
+        }))
+        val accepted = receive(processor, chunk(byteArrayOf(10, 20), 0, 1, 2)) as ProcessorResult.Accepted
+        try {
+            assertEquals(ProcessorResult.Pending, receive(processor, chunk(byteArrayOf(30), 0, 2, 2, frameId = 2u)))
+            assertEquals(0L, processor.processingBackpressureDrops)
+            assertEquals(ProcessorResult.Rejected(RaspberryPiProcessingStage.REASSEMBLY, "PROCESSING_BACKPRESSURE"),
+                receive(processor, chunk(byteArrayOf(40), 1, 2, 2, frameId = 2u)))
+            assertEquals(1, decodes)
+            assertEquals(1L, processor.processingBackpressureDrops)
+            assertEquals(0L, processor.bufferedReassemblyBytes)
+            assertEquals(0, processor.inFlightFrameCount)
+        } finally { accepted.input.frame.close() }
+        val next = receive(processor, chunk(byteArrayOf(30, 40), 0, 1, 2, frameId = 3u)) as ProcessorResult.Accepted
+        accepted.input.frame.close() // A stale close cannot release the new frame's permit.
+        assertEquals(ProcessorResult.Rejected(RaspberryPiProcessingStage.REASSEMBLY, "PROCESSING_BACKPRESSURE"),
+            receive(processor, chunk(byteArrayOf(50, 60), 0, 1, 2, frameId = 4u)))
+        assertEquals(2, decodes)
+        next.input.frame.use { assertEquals(2L, it.sequence) }
+        assertEquals(2L, processor.processingBackpressureDrops)
+    }
+
+    @Test fun failureExceptionCancellationAndRejectedConversionReleasePermit() {
+        val compiled = CompiledRaspberryPiInputProfile.compile(profile())
+        val failures = listOf(
+            PayloadDecoder { PayloadDecodeResult.Failure(PayloadDecodeError.MALFORMED_PAYLOAD) } to null,
+            PayloadDecoder { throw IllegalStateException("decoder failed") } to IllegalStateException::class.java,
+            PayloadDecoder { throw CancellationException("cancel decode") } to CancellationException::class.java,
+            PayloadDecoder { PayloadDecodeResult.Success(DecodedInput.Image(DecodedImage(2, 1, intArrayOf(0)))) } to IllegalArgumentException::class.java,
+        )
+        failures.forEach { (failing, errorType) ->
+            val permit = DecodedFramePermit()
+            val processor = RaspberryPiUdpProcessor(withDecoder(compiled, failing), permit)
+            if (errorType == null) assertEquals(ProcessorResult.Rejected(RaspberryPiProcessingStage.DECODER, "MALFORMED_PAYLOAD"),
+                receive(processor, chunk(byteArrayOf(10, 20), 0, 1, 2)))
+            else assertThrows(errorType) { receive(processor, chunk(byteArrayOf(10, 20), 0, 1, 2)) }
+            checkNotNull(permit.tryAcquire()).close()
+            val good = RaspberryPiUdpProcessor(CompiledRaspberryPiInputProfile.compile(profile()), permit)
+            (receive(good, chunk(byteArrayOf(30, 40), 0, 1, 2)) as ProcessorResult.Accepted).input.frame.close()
+        }
+    }
+
+    @Test fun eightMegapixelDeclarationsAndExistingHardAllocationEdgesStayBounded() {
+        val declarations = listOf(
+            ImagePayloadProfile.Jpeg(16 * 1024 * 1024, 3840, 2160),
+            ImagePayloadProfile.Gray8(3840, 2160),
+            ImagePayloadProfile.Binary(3840, 2160, BinaryPacking.BIT_PACKED),
+            ImagePayloadProfile.Rgb888(3840, 2160, RgbChannelOrder.RGB),
+        )
+        val permit = DecodedFramePermit()
+        val held = checkNotNull(permit.tryAcquire())
+        try {
+            declarations.forEach { payload ->
+                val c = CompiledRaspberryPiInputProfile.compile(RaspberryPiUdpInputProfile.defaults().copy(payload = payload))
+                val processor = RaspberryPiUdpProcessor(withDecoder(c, PayloadDecoder { fail("Decoder must not allocate while held"); c.decoder.decode(it) }), permit)
+                assertEquals(ProcessorResult.Rejected(RaspberryPiProcessingStage.REASSEMBLY, "PROCESSING_BACKPRESSURE"),
+                    receive(processor, chunk(byteArrayOf(10, 20), 0, 1, 2)))
+                assertEquals(1L, processor.processingBackpressureDrops)
+            }
+        } finally { held.close() }
+        assertEquals(8_294_400, DecodedAllocationPolicy.validateImage(3840, 2160).pixelCount)
+        assertEquals(33_177_600, DecodedAllocationPolicy.validateImage(3840, 2160).decodedBytes)
+        assertEquals(8_192, DecodedAllocationPolicy.validateImage(8_192, 1).width)
+        assertEquals(8_192, DecodedAllocationPolicy.validateImage(1, 8_192).height)
+        assertThrows(DecodeValidationException::class.java) { DecodedAllocationPolicy.validateImage(8_193, 1) }
+        assertThrows(DecodeValidationException::class.java) { DecodedAllocationPolicy.validateImage(1, 8_193) }
+        assertEquals(16_777_216, DecodedAllocationPolicy.validateImage(4096, 4096).pixelCount)
+        assertThrows(DecodeValidationException::class.java) { DecodedAllocationPolicy.validateImage(4096, 4097) }
+        assertEquals(67_108_864L, DecodedAllocationPolicy.validateDecodedBytes(16_777_216, 4))
+        assertThrows(DecodeValidationException::class.java) { DecodedAllocationPolicy.validateDecodedBytes(16_777_217, 4) }
+    }
+
+    private fun withDecoder(c: CompiledRaspberryPiInputProfile, decoder: PayloadDecoder) =
+        CompiledRaspberryPiInputProfile(c.profile, c.envelopeParser, c.transportParser, c.reassembler, decoder)
 
     @Test
     fun allRawFormatsReassembleOutOfOrderChunksIntoOnlyCameraImages() {

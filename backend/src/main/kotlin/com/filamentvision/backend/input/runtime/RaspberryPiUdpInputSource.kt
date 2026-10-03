@@ -33,6 +33,8 @@ class RaspberryPiUdpInputSource(
     private val lifecycle = Mutex()
     private val processingLock = Any()
     private val mailboxLock = Any()
+    // Caller-owned frames may outlive a processor or receiver lifecycle.
+    private val decodedPermit = DecodedFramePermit()
     private val activity = UdpActivity()
     private val udp = UdpDiagnostics(TransportMode.STRUCTURED_CHUNKED)
     private val ready = Channel<Unit>(Channel.CONFLATED)
@@ -83,7 +85,9 @@ class RaspberryPiUdpInputSource(
         activeProducerCount = 1 // Runtime's source lifecycle reservation; jobs never increment it.
         try {
             if (profile.enabled) {
-                synchronized(processingLock) { processor = RaspberryPiUdpProcessor(compiledFactory(profile, reassemblyObserver())) }
+                synchronized(processingLock) {
+                    processor = RaspberryPiUdpProcessor(compiledFactory(profile, reassemblyObserver()), decodedPermit)
+                }
                 synchronized(mailboxLock) { admitting = true }
                 // Refresh the selected address immediately before constructing/opening the receiver.
                 val bindIpv4 = when (val selected = profile.networkInterface) {

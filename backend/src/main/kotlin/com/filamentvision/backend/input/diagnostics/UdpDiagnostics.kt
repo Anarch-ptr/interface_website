@@ -20,6 +20,7 @@ data class UdpDiagnosticsSnapshot(
     val lastPacketMonotonicNanos: Long?, val lastValidFrameMonotonicNanos: Long?,
     val lastPacketSourceIpv4: String? = null, val lastPacketSourcePort: Int? = null,
     val lastPacketEpochMillis: Long? = null, val preAdmissionDroppedInputs: Long = 0,
+    val processingBackpressureDrops: Long = 0,
 )
 
 /** Fixed-size per-camera counters. A snapshot allocates one immutable value and no history. */
@@ -34,6 +35,7 @@ class UdpDiagnostics(private val transportMode: TransportMode) {
     private val lastPacket = AtomicLong(NO_TIME); private val lastValid = AtomicLong(NO_TIME)
     private val lastMetadata = AtomicReference<ReceivedDatagramMetadata?>(null)
     private val preAdmissionDrops = AtomicLong()
+    private val processingBackpressure = AtomicLong()
 
     fun datagramReceived(size: Int, monotonicNanos: Long) { datagrams.incrementAndGet(); bytes.addAndGet(size.toLong()); lastPacket.set(monotonicNanos) }
     fun datagramReceived(size: Int, metadata: ReceivedDatagramMetadata) {
@@ -60,6 +62,7 @@ class UdpDiagnostics(private val transportMode: TransportMode) {
     fun rejected(stage: UdpProcessingStage, reason: String) {
         dropped.incrementAndGet()
         when {
+            stage == UdpProcessingStage.REASSEMBLY && reason == "PROCESSING_BACKPRESSURE" -> processingBackpressure.incrementAndGet()
             stage == UdpProcessingStage.TRANSPORT -> invalidTransport.incrementAndGet()
             reason == "OVERSIZED_FRAME" -> oversized.incrementAndGet()
             reason == "HEADER_MISMATCH" || reason == "INVALID_HEADER" -> invalidHeader.incrementAndGet()
@@ -77,7 +80,8 @@ class UdpDiagnostics(private val transportMode: TransportMode) {
             missing.get().takeIf { chunked }, late.get().takeIf { chunked }, timeouts.get().takeIf { chunked },
             invalidTransport.get(), oversized.get(), invalidHeader.get(), invalidFooter.get(), invalidPayload.get(), decode.get(),
             sourceFiltered.get(), truncated.get(), lastPacket.time(), lastValid.time(),
-            metadata?.source?.address?.hostAddress, metadata?.source?.port, metadata?.receivedAtEpochMillis, preAdmissionDrops.get())
+            metadata?.source?.address?.hostAddress, metadata?.source?.port, metadata?.receivedAtEpochMillis, preAdmissionDrops.get(),
+            processingBackpressure.get())
     }
     private companion object { const val NO_TIME = Long.MIN_VALUE }
 }

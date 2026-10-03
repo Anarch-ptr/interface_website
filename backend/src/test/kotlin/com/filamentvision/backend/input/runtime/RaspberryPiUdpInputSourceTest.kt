@@ -22,6 +22,50 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 class RaspberryPiUdpInputSourceTest {
+    @Test fun callerOwnedPermitSurvivesStopAndBackpressuresEveryRestartUntilClosed() = runBlocking {
+        val f = Fixture(); f.source.start()
+        var admitted: CameraInput.Image? = null
+        try {
+            f.packet(wire(1))
+            admitted = withTimeout(3000) { f.source.inputs.first() } as CameraInput.Image
+            assertEquals(1, f.decodes.get())
+            repeat(2) {
+                f.source.stop(); f.source.start()
+                f.packet(wire(2))
+                assertEquals(0, f.source.pendingInputCount)
+                assertEquals(1, f.decodes.get())
+            }
+            assertEquals(0xff070707.toInt(), admitted.frame.pixels[0])
+            assertEquals(2L, f.source.udpDiagnostics().processingBackpressureDrops)
+            assertEquals(2L, f.source.udpDiagnostics().framesDropped)
+            assertEquals(0L, f.source.udpDiagnostics().decodeFailures)
+            admitted.frame.close()
+            f.packet(wire(3))
+            val next = withTimeout(3000) { f.source.inputs.first() } as CameraInput.Image
+            admitted.frame.close()
+            f.packet(wire(4))
+            assertEquals(2, f.decodes.get())
+            assertEquals(0, f.source.pendingInputCount)
+            assertEquals(3L, f.source.udpDiagnostics().processingBackpressureDrops)
+            next.frame.close()
+        } finally { admitted?.frame?.close(); f.source.stop() }
+    }
+
+    @Test fun stoppingPendingFrameAndRejectingLateOfferReleaseDecodedPermit() = runBlocking {
+        val f = Fixture(); f.source.start()
+        try {
+            f.packet(wire(1))
+            assertEquals(1, f.source.pendingInputCount)
+            f.source.stop(); f.source.start()
+            f.packet(wire(2))
+            val input = withTimeout(3000) { f.source.inputs.first() } as CameraInput.Image
+            f.source.stop()
+            f.source.offerInput(input) // Discard after ownership transfer closes the accepted frame.
+            f.source.start(); f.packet(wire(3))
+            (withTimeout(3000) { f.source.inputs.first() } as CameraInput.Image).frame.close()
+            assertEquals(3, f.decodes.get())
+        } finally { f.source.stop() }
+    }
     @Test fun statusUsesExactGraceRecencyAndNewestSourceActivity() = runBlocking {
         val f = Fixture(profile().copy(raspberryPiIpv4 = "192.0.2.10"))
         assertEquals(UdpOperationalStatus.DISABLED, f.source.operationalStatus().status)
@@ -277,10 +321,16 @@ class RaspberryPiUdpInputSourceTest {
 
     private class Fixture(p: RaspberryPiUdpInputProfile = profile()) {
         val now = AtomicLong(0)
+        val decodes = AtomicLong()
         var opens = 0
         lateinit var socket: FakeChannel
         val source = RaspberryPiUdpInputSource(p, monotonicClock = MonotonicClock(now::get),
-            epochClock = EpochClock { 1234 }, channelFactory = UdpChannelFactory { opens++; FakeChannel().also { socket = it } })
+            epochClock = EpochClock { 1234 }, channelFactory = UdpChannelFactory { opens++; FakeChannel().also { socket = it } },
+            compiledFactory = { profile, observer ->
+                val c = CompiledRaspberryPiInputProfile.compile(profile, observer)
+                CompiledRaspberryPiInputProfile(c.profile, c.envelopeParser, c.transportParser, c.reassembler,
+                    PayloadDecoder { decodes.incrementAndGet(); c.decoder.decode(it) })
+            })
         suspend fun packet(bytes: ByteArray, ip: String = "192.0.2.10") {
             val next = socket.completedReceives.get() + 1
             socket.enqueue(bytes, ip)

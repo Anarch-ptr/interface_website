@@ -7,6 +7,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UdpDiagnosticsTest {
+    @Test fun processingBackpressureCountsDropsWithoutDecoderFailures() {
+        val d = UdpDiagnostics(TransportMode.STRUCTURED_CHUNKED)
+        d.rejected(com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage.REASSEMBLY, "PROCESSING_BACKPRESSURE")
+        val first = d.snapshot()
+        assertEquals(1L, first.processingBackpressureDrops)
+        assertEquals(1L, first.framesDropped)
+        assertEquals(0L, first.decodeFailures)
+        d.rejected(com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage.DECODER, "MALFORMED_PAYLOAD")
+        d.rejected(com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage.REASSEMBLY, "PROCESSING_BACKPRESSURE")
+        val next = d.snapshot()
+        assertEquals(2L, next.processingBackpressureDrops)
+        assertEquals(3L, next.framesDropped)
+        assertEquals(1L, next.decodeFailures)
+        assertEquals(0L, next.preAdmissionDroppedInputs)
+        assertEquals(1L, first.processingBackpressureDrops)
+    }
     @Test fun singleStreamMetadataAndRejectionStagesAreRetainedWithoutHistory() {
         val d = UdpDiagnostics(TransportMode.STRUCTURED_CHUNKED)
         d.datagramReceived(39, com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata(
