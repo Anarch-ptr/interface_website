@@ -6,6 +6,7 @@ import java.sql.DriverManager
 import java.sql.SQLException
 import com.filamentvision.core.repository.RepositoryException
 import com.filamentvision.core.repository.RepositoryFailure
+import com.filamentvision.backend.input.profile.*
 
 /** Connections are scoped to an operation. Close prevents further operations and waits for
  * any in-flight operation; migration and multi-row writes use explicit transactions.
@@ -24,7 +25,7 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
                     migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
                     statement.execute("PRAGMA user_version = 1")
                 }
-            } else if (version !in 1..3) throw RepositoryException(RepositoryFailure.STORAGE, "Unsupported schema version")
+            } else if (version !in 1..4) throw RepositoryException(RepositoryFailure.STORAGE, "Unsupported schema version")
             if (version < 2) {
                 val migration = checkNotNull(javaClass.getResourceAsStream("/db/migration/V002__snapshot_source_sequence.sql"))
                     .bufferedReader().use { it.readText() }
@@ -41,6 +42,53 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
                     statement.execute("PRAGMA user_version = 3")
                 }
             }
+            if (version < 4) {
+                val migration = checkNotNull(javaClass.getResourceAsStream("/db/migration/V004__single_camera_udp_and_measurements.sql"))
+                    .bufferedReader().use { it.readText() }
+                connection.createStatement().use { statement ->
+                    migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
+                }
+                seedSingleCameraProfile(connection)
+                connection.createStatement().use { it.execute("PRAGMA user_version = 4") }
+            }
+        }
+    }
+
+    /** Runs inside the migration transaction, including decoding/validation and both pointers. */
+    private fun seedSingleCameraProfile(connection: Connection) {
+        val old = connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT payload FROM udp_input_revisions ORDER BY revision DESC LIMIT 1").use { row ->
+                if (row.next()) UdpInputProfileCodec.decode(row.getBytes(1)).cameraA else null
+            }
+        }
+        val defaults = RaspberryPiUdpInputProfile.defaults()
+        var profile = defaults
+        if (old != null) {
+            profile = defaults.copy(listenPort = old.listenPort, raspberryPiIpv4 = old.sourceIp)
+            val payload = when (val value = old.payload) {
+                is PayloadProfile.Jpeg -> ImagePayloadProfile.Jpeg(value.maxFrameBytes, value.expectedWidth, value.expectedHeight)
+                is PayloadProfile.Gray8 -> ImagePayloadProfile.Gray8(value.width, value.height)
+                is PayloadProfile.Binary -> ImagePayloadProfile.Binary(value.width, value.height, value.binaryPacking)
+                is PayloadProfile.Rgb888 -> ImagePayloadProfile.Rgb888(value.width, value.height, value.channelOrder)
+                is PayloadProfile.Diameter -> defaults.payload
+            }
+            val candidate = profile.copy(payload = payload, transportLimits = old.transportLimits)
+            if (RaspberryPiUdpInputProfileValidator().validate(candidate).isValid) profile = candidate
+            val framing = old.applicationFraming
+            if (framing.headerEnabled && framing.footerEnabled &&
+                framing.headerFormat == FramingFormat.HEX && framing.footerFormat == FramingFormat.HEX &&
+                framing.headerScope == FramingScope.DATAGRAM && framing.footerScope == FramingScope.DATAGRAM &&
+                framing.stripHeader && framing.stripFooter) {
+                val envelope = try { DatagramEnvelopeProfile(normalizeTwoByteHex(framing.headerBytes), normalizeTwoByteHex(framing.footerBytes)) }
+                catch (_: IllegalArgumentException) { defaults.envelope }
+                profile = profile.copy(envelope = envelope)
+            }
+        }
+        connection.prepareStatement("INSERT INTO raspberry_pi_udp_input_revisions(payload) VALUES (?)").use {
+            it.setBytes(1, RaspberryPiUdpInputProfileCodec.encode(profile)); it.executeUpdate()
+        }
+        connection.createStatement().use {
+            it.execute("INSERT INTO raspberry_pi_udp_input_state(singleton,saved_revision,applied_revision) VALUES (1,last_insert_rowid(),last_insert_rowid())")
         }
     }
     @Synchronized internal fun <T> access(write: Boolean = false, action: (Connection) -> T): T {

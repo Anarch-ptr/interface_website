@@ -3,7 +3,6 @@ package com.filamentvision.backend.persistence.sqlite
 import com.filamentvision.core.alarm.*
 import com.filamentvision.core.config.*
 import com.filamentvision.core.frame.CameraId
-import com.filamentvision.core.fusion.FusionReason
 import com.filamentvision.core.model.*
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
@@ -36,13 +35,12 @@ abstract class RepositoryConformance {
         r.sessions.createSession(session)
         fails(RepositoryFailure.CONFLICT) { r.sessions.createSession(session) }
     }
-    @Test fun measurementsRetainNullSidesAndEveryCameraAndFusionField() {
+    @Test fun measurementsRetainOneEvidenceAndEveryVisionField() {
         r.sessions.createSession(session)
-        val both = measurement("both", 10)
-        val a = both.copy(id = "a", measurement = both.measurement.copy(cameraB = null, status = MeasurementStatus.CAMERA_B_FAILURE, fusionReason = FusionReason.CAMERA_B_MISSING))
-        val b = both.copy(id = "b", measurement = both.measurement.copy(cameraA = null, status = MeasurementStatus.CAMERA_A_FAILURE, fusionReason = FusionReason.CAMERA_A_MISSING))
-        r.measurements.appendMeasurements(listOf(both, a, b))
-        assertEquals(listOf(a, b, both), r.measurements.history("s").items)
+        val sample = measurement("m", 10)
+        r.measurements.appendMeasurements(listOf(sample))
+        assertEquals(listOf(sample), r.measurements.history("s").items)
+        assertNull(r.measurements.history("s").items.single().measurement.legacyFusion)
     }
     @Test fun batchWithInvalidForeignKeyRollsBackEarlierValidRows() {
         r.sessions.createSession(session)
@@ -79,8 +77,8 @@ abstract class RepositoryConformance {
         r.measurements.appendMeasurements(listOf(original, original))
         assertEquals(listOf(original), r.measurements.history("s").items)
         val changes = listOf(original.copy(appliedRevision = 2), original.copy(sessionId = "other"),
-            original.copy(measurement = original.measurement.copy(cameraA = original.measurement.cameraA!!.copy(sequence = 99))),
-            original.copy(measurement = original.measurement.copy(confidence = .5)))
+            original.copy(measurement = original.measurement.copy(evidence = listOf(original.measurement.evidence.single().copy(sequence = 99)))),
+            original.copy(measurement = original.measurement.copy(evidence = original.measurement.evidence, confidence = .5)))
         changes.forEach { changed -> fails(RepositoryFailure.CONFLICT) {
             r.measurements.appendMeasurements(listOf(measurement("new", 20), changed))
         } }
@@ -129,7 +127,7 @@ abstract class RepositoryConformance {
     }
     @Test fun nonFiniteEvidenceIsRejectedInsteadOfConvertingToNull() {
         r.sessions.createSession(session)
-        fails(RepositoryFailure.INVALID) { r.measurements.appendMeasurements(listOf(measurement("ok", 1), measurement("bad", 2).let { it.copy(measurement = it.measurement.copy(confidence = Double.NaN)) })) }
+        fails(RepositoryFailure.INVALID) { r.measurements.appendMeasurements(listOf(measurement("ok", 1), measurement("bad", 2).let { it.copy(measurement = it.measurement.copy(evidence = it.measurement.evidence, confidence = Double.NaN)) })) }
         assertTrue(r.measurements.history("s").items.isEmpty())
     }
     protected fun fails(kind: RepositoryFailure, action: () -> Unit) {
@@ -139,14 +137,12 @@ abstract class RepositoryConformance {
         val session = RuntimeSession("s", 7, 1)
         val alarm = AlarmEventRecord("alarm", "s", AlarmTransition(AlarmState(), AlarmState(AlarmLevel.CRITICAL, AlarmDirection.HIGH, 6.0), 10, 1.86))
         val configuration = MonitoringConfiguration(
-            cameraA = VisionConfiguration(CalibrationProfile(1, 2, 30, 40, GrayscaleMethod.AVERAGE, ThresholdMode.AUTOMATIC, 57, 12, 3, 27, .021, .83), ImageGeometry(90, true, false)),
-            cameraB = VisionConfiguration(CalibrationProfile(4, 5, 80, 90, GrayscaleMethod.LUMA_BT601, ThresholdMode.MANUAL, 67, 13, 4, 28, .022, .84), ImageGeometry(270, false, true)),
-            fusion = FusionConfiguration(.3, .7, .8, 321), targetDiameter = 1.8, writeBatchSize = 12, flushIntervalMillis = 750,
+            vision = VisionConfiguration(CalibrationProfile(1, 2, 30, 40, GrayscaleMethod.AVERAGE, ThresholdMode.AUTOMATIC, 57, 12, 3, 27, .021, .83), ImageGeometry(90, true, false)),
+            targetDiameter = 1.8, writeBatchSize = 12, flushIntervalMillis = 750,
             realtimeCapacity = 90, previewFramesPerSecond = 3, publicationIntervalMillis = 333,
         )
         fun measurement(id: String, time: Long) = MeasurementRecord(id, "s", OfficialMeasurement(
-            CameraMeasurement(CameraId("A"), 83.0, 1.7, .91, 101, 23, true, 1, 2, 30, 40, 3, 29),
-            CameraMeasurement(CameraId("B"), 84.0, 1.8, .93, 102, 24, true, 4, 5, 31, 41, null, null),
-            1.77, .1, .92, MeasurementStatus.NORMAL, time, FusionReason.BOTH_CAMERAS))
+            listOf(CameraMeasurement(CameraId("camera"), 83.0, 1.77, .92, 101, 23, true, 1, 2, 30, 40, 3, 29)),
+            1.77, .92, MeasurementStatus.NORMAL, time))
     }
 }

@@ -74,19 +74,26 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
 
     override fun appendMeasurements(batch: List<MeasurementRecord>) {
         database.access(true) { connection ->
-            connection.prepareStatement("INSERT INTO measurements (" + measurementColumns.joinToString(",") +
+            connection.prepareStatement("INSERT INTO measurements_v2 (" + measurementColumns.joinToString(",") +
                 ") VALUES (" + measurementColumns.joinToString(",") { "?" } + ")").use { statement ->
                 batch.forEach { record ->
-                    val existing = connection.query("SELECT * FROM measurements WHERE id=?", listOf(record.id)) { it.measurementRecord() }.singleOrNull()
+                    val existing = connection.measurement(record.id, legacy = false) ?: connection.measurement(record.id, legacy = true)
                     if (existing != null) {
                         if (existing.canonicalZeros() != record.canonicalZeros()) fail(RepositoryFailure.CONFLICT, "Measurement identity has different evidence")
                         return@forEach
                     }
                     val m = record.measurement
-                    finite(m.fusedDiameter, m.shapeDifference, m.confidence)
+                    if (m.legacyFusion != null || m.evidence.size != 1)
+                        fail(RepositoryFailure.INVALID, "Current measurements require one neutral evidence")
+                    val evidence = m.evidence.single()
+                    finite(m.diameterMm, m.confidence, evidence.diameterMm, evidence.confidence)
+                    evidence.pixelWidth?.let { finite(it) }
+                    if (m.diameterMm != evidence.diameterMm || m.confidence != evidence.confidence)
+                        fail(RepositoryFailure.INVALID, "Official measurement must retain its evidence values")
                     val values = listOf(record.id, record.sessionId, m.timestamp, record.appliedRevision,
-                        m.fusedDiameter, m.shapeDifference, m.confidence, m.status.name, m.fusionReason.name) +
-                        cameraValues(m.cameraA) + cameraValues(m.cameraB)
+                        m.diameterMm, m.confidence, m.status.name, evidence.cameraId.value, evidence.pixelWidth,
+                        evidence.timestamp, evidence.sequence, evidence.valid, evidence.roiLeft, evidence.roiTop,
+                        evidence.roiRight, evidence.roiBottom, evidence.leftEdge, evidence.rightEdge, evidence.error?.name, evidence.source.name)
                     values.forEachIndexed { index, value -> statement.setObject(index + 1, value) }
                     statement.executeUpdate()
                 }
@@ -106,10 +113,14 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
             if (from != null) { predicates += "timestamp >= ?"; values += from }
             if (through != null) { predicates += "timestamp <= ?"; values += through }
             values += limit + 1
-            val found = connection.query("SELECT * FROM measurements WHERE " + predicates.joinToString(" AND ") +
-                " ORDER BY timestamp,id LIMIT ?", values) { row ->
-                row.measurementRecord()
+            // Limit only after the union: equal timestamps share one global id keyset.
+            val keys = connection.query("""SELECT id,legacy FROM (
+                SELECT id,session_id,timestamp,0 AS legacy FROM measurements_v2
+                UNION ALL SELECT id,session_id,timestamp,1 AS legacy FROM measurements
+                ) WHERE """ + predicates.joinToString(" AND ") + " ORDER BY timestamp,id LIMIT ?", values) {
+                it.getString("id") to it.getBoolean("legacy")
             }
+            val found = keys.map { (id, legacy) -> checkNotNull(connection.measurement(id, legacy)) }
             val page = found.take(limit)
             MeasurementPage(page, if (found.size > limit) page.last().let { HistoryCursor(it.measurement.timestamp, it.id) } else null)
         }
@@ -156,11 +167,12 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         }
     }
     override fun saveConfiguration(configuration: MonitoringConfiguration): ConfigurationRevision {
-        configuration.validate()
+        val neutral = configuration.copy(legacy = null)
+        neutral.validate()
         return database.access(true) { connection ->
-            connection.update("INSERT INTO configuration_revisions(payload) VALUES (?)", ConfigurationCodec.encode(configuration))
+            connection.update("INSERT INTO configuration_revisions(payload) VALUES (?)", ConfigurationCodec.encode(neutral))
             val revision = connection.query("SELECT last_insert_rowid()", emptyList()) { it.getLong(1) }.single()
-            ConfigurationRevision(revision, configuration)
+            ConfigurationRevision(revision, neutral)
         }
     }
     override fun configuration(revision: Long): ConfigurationRevision? = database.access { it.configuration(revision) }
@@ -182,12 +194,20 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
         }
     }
 
-    private fun cameraValues(camera: CameraMeasurement?): List<Any?> {
-        if (camera == null) return List(cameraFields.size) { null }
-        finite(camera.diameterMm, camera.confidence)
-        camera.pixelWidth?.let { finite(it) }
-        return with(camera) { listOf(cameraId.value, pixelWidth, diameterMm, confidence, timestamp, sequence, valid,
-            roiLeft, roiTop, roiRight, roiBottom, leftEdge, rightEdge, error?.name, source.name) }
+    private fun Connection.measurement(id: String, legacy: Boolean): MeasurementRecord? =
+        query("SELECT * FROM " + (if (legacy) "measurements" else "measurements_v2") + " WHERE id=?", listOf(id)) {
+            if (legacy) it.measurementRecord() else it.neutralMeasurementRecord()
+        }.singleOrNull()
+
+    private fun ResultSet.neutralMeasurementRecord(): MeasurementRecord {
+        val evidence = CameraMeasurement(CameraId(getString("source_id")), doubleOrNull("pixel_width"),
+            getDouble("diameter_mm"), getDouble("confidence"), getLong("source_timestamp"), getLong("source_sequence"),
+            getBoolean("valid"), getInt("roi_left"), getInt("roi_top"), getInt("roi_right"), getInt("roi_bottom"),
+            intOrNull("left_edge"), intOrNull("right_edge"), getString("error")?.let(DetectionError::valueOf),
+            CameraMeasurementSource.valueOf(getString("source")))
+        return MeasurementRecord(getString("id"), getString("session_id"), OfficialMeasurement(
+            listOf(evidence), evidence.diameterMm, evidence.confidence, MeasurementStatus.valueOf(getString("status")),
+            getLong("timestamp")), longOrNull("applied_revision"))
     }
     private fun ResultSet.measurementRecord() = MeasurementRecord(getString("id"), getString("session_id"), OfficialMeasurement(
         camera("a"), camera("b"), getDouble("fused_diameter"), getDouble("shape_difference"),
@@ -199,8 +219,10 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
     private fun CameraMeasurement.canonicalZeros() = copy(pixelWidth = pixelWidth?.let(::canonicalZero),
         diameterMm = canonicalZero(diameterMm), confidence = canonicalZero(confidence))
     private fun MeasurementRecord.canonicalZeros() = copy(measurement = measurement.copy(
-        cameraA = measurement.cameraA?.canonicalZeros(), cameraB = measurement.cameraB?.canonicalZeros(),
-        fusedDiameter = canonicalZero(measurement.fusedDiameter), shapeDifference = canonicalZero(measurement.shapeDifference),
+        evidence = measurement.evidence.map { it.canonicalZeros() },
+        legacyFusion = measurement.legacyFusion?.let { it.copy(cameraA = it.cameraA?.canonicalZeros(), cameraB = it.cameraB?.canonicalZeros(),
+            shapeDifference = canonicalZero(it.shapeDifference)) },
+        diameterMm = canonicalZero(measurement.diameterMm),
         confidence = canonicalZero(measurement.confidence)))
     private fun AlarmEventRecord.canonicalZeros() = copy(transition = transition.copy(
         fusedDiameter = canonicalZero(transition.fusedDiameter),
@@ -236,9 +258,8 @@ class SqliteRepositories(private val database: SqliteDatabase) : SessionReposito
     }
     private fun fail(type: RepositoryFailure, message: String): Nothing = throw RepositoryException(type, message)
     companion object {
-        private val cameraFields = listOf("id", "pixel_width", "diameter", "confidence", "timestamp", "sequence", "valid",
+        private val measurementColumns = listOf("id", "session_id", "timestamp", "applied_revision", "diameter_mm",
+            "confidence", "status", "source_id", "pixel_width", "source_timestamp", "source_sequence", "valid",
             "roi_left", "roi_top", "roi_right", "roi_bottom", "left_edge", "right_edge", "error", "source")
-        private val measurementColumns = listOf("id", "session_id", "timestamp", "applied_revision", "fused_diameter",
-            "shape_difference", "confidence", "status", "fusion_reason") + cameraFields.map { "a_" + it } + cameraFields.map { "b_" + it }
     }
 }
