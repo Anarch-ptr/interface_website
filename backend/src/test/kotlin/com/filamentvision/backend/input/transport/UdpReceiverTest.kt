@@ -29,6 +29,22 @@ import java.nio.channels.DatagramChannel
 
 class UdpReceiverTest {
     @Test
+    fun bindsSelectedIpv4AndReportsBorrowedPacketMetadata() = runBlocking {
+        val observed = CompletableDeferred<Triple<String, Int, Long>>()
+        val receiver = UdpReceiver(profile(freePort()), bindIpv4 = "127.0.0.1",
+            epochClock = EpochClock { 1234 }, observer = object : UdpReceiverObserver {
+                override fun onReceived(datagram: ReceivedDatagram) {
+                    observed.complete(Triple(datagram.source.address.hostAddress, datagram.size, datagram.receivedAtEpochMillis))
+                }
+            }) { }
+        try {
+            receiver.start()
+            assertEquals("127.0.0.1", receiver.localAddress.address.hostAddress)
+            send(receiver.localAddress.port, byteArrayOf(7))
+            assertEquals(Triple("127.0.0.1", 1, 1234L), withTimeout(3000) { observed.await() })
+        } finally { receiver.stop() }
+    }
+    @Test
     fun receivesMaximumLegalStructuredEnvelopeWithoutTruncation() = runBlocking {
         val observedSize = CompletableDeferred<Int>()
         val outcome = CompletableDeferred<Any>()

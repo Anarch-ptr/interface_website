@@ -2,7 +2,10 @@ package com.filamentvision.backend.input.diagnostics
 
 import com.filamentvision.backend.input.profile.TransportMode
 import com.filamentvision.backend.input.runtime.UdpProcessingStage
+import com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage
+import com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 data class UdpDiagnosticsSnapshot(
     val transportMode: TransportMode,
@@ -15,6 +18,8 @@ data class UdpDiagnosticsSnapshot(
     val invalidPayloadSizeCount: Long, val decodeFailures: Long,
     val sourceFilteredDatagrams: Long, val oversizedOrTruncatedDatagrams: Long,
     val lastPacketMonotonicNanos: Long?, val lastValidFrameMonotonicNanos: Long?,
+    val lastPacketSourceIpv4: String? = null, val lastPacketSourcePort: Int? = null,
+    val lastPacketEpochMillis: Long? = null, val preAdmissionDroppedInputs: Long = 0,
 )
 
 /** Fixed-size per-camera counters. A snapshot allocates one immutable value and no history. */
@@ -27,8 +32,21 @@ class UdpDiagnostics(private val transportMode: TransportMode) {
     private val invalidHeader = AtomicLong(); private val invalidFooter = AtomicLong(); private val invalidPayload = AtomicLong()
     private val decode = AtomicLong(); private val sourceFiltered = AtomicLong(); private val truncated = AtomicLong()
     private val lastPacket = AtomicLong(NO_TIME); private val lastValid = AtomicLong(NO_TIME)
+    private val lastMetadata = AtomicReference<ReceivedDatagramMetadata?>(null)
+    private val preAdmissionDrops = AtomicLong()
 
     fun datagramReceived(size: Int, monotonicNanos: Long) { datagrams.incrementAndGet(); bytes.addAndGet(size.toLong()); lastPacket.set(monotonicNanos) }
+    fun datagramReceived(size: Int, metadata: ReceivedDatagramMetadata) {
+        datagramReceived(size, metadata.receivedAtMonotonicNanos)
+        lastMetadata.set(metadata)
+    }
+    fun preAdmissionDropped() { preAdmissionDrops.incrementAndGet(); dropped.incrementAndGet() }
+    fun rejected(stage: RaspberryPiProcessingStage, reason: String) = rejected(when (stage) {
+        RaspberryPiProcessingStage.ENVELOPE -> UdpProcessingStage.DATAGRAM_FRAMING
+        RaspberryPiProcessingStage.TRANSPORT -> UdpProcessingStage.TRANSPORT
+        RaspberryPiProcessingStage.REASSEMBLY -> UdpProcessingStage.REASSEMBLY
+        RaspberryPiProcessingStage.DECODER -> UdpProcessingStage.DECODER
+    }, reason)
     fun frameStarted() { started.incrementAndGet() }
     fun frameCompleted(monotonicNanos: Long) { completed.incrementAndGet(); lastValid.set(monotonicNanos) }
     fun chunkDuplicate() { duplicates.incrementAndGet() }
@@ -53,11 +71,13 @@ class UdpDiagnostics(private val transportMode: TransportMode) {
     fun snapshot(): UdpDiagnosticsSnapshot {
         val chunked = transportMode == TransportMode.STRUCTURED_CHUNKED
         fun AtomicLong.time() = get().takeUnless { it == NO_TIME }
+        val metadata = lastMetadata.get()
         return UdpDiagnosticsSnapshot(transportMode, datagrams.get(), bytes.get(), started.get().takeIf { chunked },
             completed.get(), dropped.get(), duplicates.get().takeIf { chunked }, outOfOrder.get().takeIf { chunked },
             missing.get().takeIf { chunked }, late.get().takeIf { chunked }, timeouts.get().takeIf { chunked },
             invalidTransport.get(), oversized.get(), invalidHeader.get(), invalidFooter.get(), invalidPayload.get(), decode.get(),
-            sourceFiltered.get(), truncated.get(), lastPacket.time(), lastValid.time())
+            sourceFiltered.get(), truncated.get(), lastPacket.time(), lastValid.time(),
+            metadata?.source?.address?.hostAddress, metadata?.source?.port, metadata?.receivedAtEpochMillis, preAdmissionDrops.get())
     }
     private companion object { const val NO_TIME = Long.MIN_VALUE }
 }

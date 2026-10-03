@@ -30,6 +30,7 @@ enum class UdpReceiverDropReason { DATAGRAM_TOO_LARGE_OR_TRUNCATED }
 
 interface UdpReceiverObserver {
     fun onReceived(size: Int, receivedAtMonotonicNanos: Long) = Unit
+    fun onReceived(datagram: ReceivedDatagram) = onReceived(datagram.size, datagram.receivedAtMonotonicNanos)
     fun onSourceFiltered(datagram: ReceivedDatagram) = Unit
     fun onDropped(reason: UdpReceiverDropReason) = Unit
     fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) = onDropped(reason)
@@ -62,6 +63,7 @@ class UdpReceiver(
     private val epochClock: EpochClock = EpochClock(System::currentTimeMillis),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     envelopeBytes: Int = 0,
+    private val bindIpv4: String = "0.0.0.0",
     private val consumer: UdpDatagramConsumer,
 ) {
     private val lifecycle = Mutex()
@@ -88,18 +90,21 @@ class UdpReceiver(
 
     suspend fun start() = lifecycle.withLock {
         if (receiverJob?.isActive == true) return@withLock
+        var opening: DatagramChannel? = null
         val opened = try {
             withContext(dispatcher) {
                 channelFactory.open().also { socket ->
+                    opening = socket
                     socket.setOption(
                         StandardSocketOptions.SO_RCVBUF,
                         max(MIN_SOCKET_RECEIVE_QUEUE_BYTES, receiveCapacity.receiveCapacity),
                     )
-                    socket.bind(InetSocketAddress(InetAddress.getByName(IPV4_ANY), profile.listenPort))
+                    socket.bind(InetSocketAddress(InetAddress.getByName(bindIpv4), profile.listenPort))
                     check((socket.localAddress as InetSocketAddress).address is Inet4Address)
                 }
             }
         } catch (error: Throwable) {
+            opening?.close()
             state = UdpReceiverState.ERROR
             throw error
         }
@@ -136,7 +141,7 @@ class UdpReceiver(
                     bytes = BorrowedDatagramBytes(receiveArray, receivedSize),
                 )
                 try {
-                    observer.onReceived(receivedSize, datagram.receivedAtMonotonicNanos)
+                    observer.onReceived(datagram)
                     if (!sourceFilter.accepts(source)) {
                         observer.onSourceFiltered(datagram)
                     } else if (receiveCapacity.sentinelEnabled && receivedSize == receiveCapacity.receiveCapacity) {
@@ -163,7 +168,6 @@ class UdpReceiver(
     }
 
     private companion object {
-        const val IPV4_ANY = "0.0.0.0"
         const val MIN_SOCKET_RECEIVE_QUEUE_BYTES = 256 * 1024
     }
 }

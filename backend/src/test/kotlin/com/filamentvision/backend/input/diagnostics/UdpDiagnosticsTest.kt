@@ -7,6 +7,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UdpDiagnosticsTest {
+    @Test fun singleStreamMetadataAndRejectionStagesAreRetainedWithoutHistory() {
+        val d = UdpDiagnostics(TransportMode.STRUCTURED_CHUNKED)
+        d.datagramReceived(39, com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata(
+            java.net.InetSocketAddress("192.0.2.10", 9000), 12, 1234))
+        d.rejected(com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage.ENVELOPE, "HEADER_MISMATCH")
+        d.rejected(com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage.ENVELOPE, "FOOTER_MISMATCH")
+        d.rejected(com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage.DECODER, "INVALID_PAYLOAD_SIZE")
+        d.preAdmissionDropped()
+        val s = d.snapshot()
+        assertEquals("192.0.2.10", s.lastPacketSourceIpv4)
+        assertEquals(9000, s.lastPacketSourcePort)
+        assertEquals(1234L, s.lastPacketEpochMillis)
+        assertEquals(12L, s.lastPacketMonotonicNanos)
+        assertEquals(39, s.bytesReceived)
+        assertEquals(1, s.invalidHeaderCount); assertEquals(1, s.invalidFooterCount)
+        assertEquals(1, s.decodeFailures); assertEquals(1, s.preAdmissionDroppedInputs)
+        assertEquals(4, s.framesDropped)
+    }
     @Test fun snapshotsAreBoundedAndChunkFieldsAreNotApplicableForSingleDatagram() {
         val d = UdpDiagnostics(TransportMode.SINGLE_DATAGRAM)
         d.datagramReceived(120, 10); d.frameCompleted(11)
