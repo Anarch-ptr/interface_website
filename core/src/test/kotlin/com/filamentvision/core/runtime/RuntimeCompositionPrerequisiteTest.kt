@@ -1,8 +1,6 @@
 package com.filamentvision.core.runtime
 
 import com.filamentvision.core.config.*
-import com.filamentvision.core.frame.CameraId
-import com.filamentvision.core.model.FusionConfiguration
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.*
 import org.junit.Assert.*
@@ -21,7 +19,7 @@ class RuntimeCompositionPrerequisiteTest {
         assertEquals(0 to 8, h.runtime.queuedCounts())
         val stop = async { h.runtime.stop(StopMonitoringCommand("stop")) }; runCurrent()
         assertFalse(stop.isCompleted)
-        assertFalse(h.runtime.configureWhenStopped(MonitoringConfiguration(), CameraId("A"), CameraId("B")))
+        assertFalse(h.runtime.configureWhenStopped(MonitoringConfiguration()))
         assertEquals(0, h.sink.finalized.size)
         release.complete(Unit); stop.await()
         assertEquals(8, h.sink.alarms.size)
@@ -55,25 +53,25 @@ class RuntimeCompositionPrerequisiteTest {
         runCurrent()
         assertEquals(0 to 1, h.runtime.queuedCounts())
         assertEquals(0, h.sink.finalized.size)
-        assertFalse(h.runtime.configureWhenStopped(MonitoringConfiguration(), CameraId("A"), CameraId("B")))
+        assertFalse(h.runtime.configureWhenStopped(MonitoringConfiguration()))
         assertEquals(StartOutcome.FAILED, h.runtime.start(StartMonitoringCommand("restart")).outcome)
         assertTrue(runCatching { h.runtime.close() }.isFailure)
     }
 
     @Test fun stoppedConfigurationChangesNextSessionProcessingBatchTimerAndRing() = runTest {
         val h = Harness(backgroundScope)
-        val c = MonitoringConfiguration(Harness.config.copy(calibration = Harness.config.calibration.copy(mmPerPixel = .2)),
-            Harness.config, FusionConfiguration(1.0, 0.0, .7, 100), .8, 3, 250, 2)
-        assertTrue(h.runtime.configureWhenStopped(c, CameraId("A"), CameraId("B")))
+        val c = MonitoringConfiguration(vision = Harness.config.copy(calibration = Harness.config.calibration.copy(mmPerPixel = .2)),
+            targetDiameter = .8, writeBatchSize = 3, flushIntervalMillis = 250, realtimeCapacity = 2)
+        assertTrue(h.runtime.configureWhenStopped(c))
         h.runtime.start(StartMonitoringCommand("start"))
-        assertFalse(h.runtime.configureWhenStopped(c.copy(targetDiameter = 4.0), CameraId("A"), CameraId("B")))
+        assertFalse(h.runtime.configureWhenStopped(c.copy(targetDiameter = 4.0)))
         h.send(3); runCurrent()
-        assertEquals(.8, h.runtime.state.value.latestMeasurement!!.fusedDiameter, 0.0)
+        assertEquals(.8, h.runtime.state.value.latestMeasurement!!.diameterMm, 0.0)
         assertEquals(3, h.sink.measurements.size)
         assertEquals(2, h.runtime.realtimeMeasurements().size)
         assertEquals(0, h.sink.alarms.size)
-        h.source.input.send(Harness.frame(4, "B", 5)); runCurrent()
-        assertEquals(.8, h.runtime.state.value.latestMeasurement!!.fusedDiameter, 0.0)
+        h.source.input.send(Harness.frame(4)); runCurrent()
+        assertEquals(.8, h.runtime.state.value.latestMeasurement!!.diameterMm, 0.0)
         advanceTimeBy(250); runCurrent()
         assertEquals(4, h.sink.measurements.size)
         h.runtime.close()

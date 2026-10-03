@@ -4,6 +4,7 @@ import com.filamentvision.core.alarm.AlarmState
 import com.filamentvision.core.alarm.AlarmTransition
 import com.filamentvision.core.model.OfficialMeasurement
 import com.filamentvision.core.session.SessionStatistics
+import com.filamentvision.core.vision.DetectionError
 
 enum class MonitoringLifecycle { IDLE, STARTING, RUNNING, STOPPING, ERROR }
 data class RuntimeSession(val id: String, val generation: Long, val startedAtEpochMillis: Long)
@@ -15,6 +16,14 @@ data class SessionFinalization(
     val statistics: SessionStatistics,
     val error: String? = null,
 )
+
+/** Session-local image diagnostics; invalid Vision results never enter official statistics. */
+data class RuntimeVisionDiagnostics(
+    val processedFrames: Long = 0,
+    val rejectedFrames: Long = 0,
+    val lastError: DetectionError? = null,
+)
+
 data class MonitoringState(
     val lifecycle: MonitoringLifecycle = MonitoringLifecycle.IDLE,
     val activeSession: RuntimeSession? = null,
@@ -25,6 +34,7 @@ data class MonitoringState(
     val maximumActiveProducerCount: Int = 0,
     val cachedCommandCount: Int = 0,
     val error: String? = null,
+    val visionDiagnostics: RuntimeVisionDiagnostics = RuntimeVisionDiagnostics(),
 )
 
 /** Minimal runtime ports. Durable repository schemas and adapters belong to Task 8.

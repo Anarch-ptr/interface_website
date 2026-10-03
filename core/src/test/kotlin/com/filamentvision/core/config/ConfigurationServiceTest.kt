@@ -38,7 +38,7 @@ class ConfigurationServiceTest {
     @Test fun activeRestartSensitiveApplyRequiresStopWithoutChangingState() {
         service.saveAndApply(MonitoringConfiguration())
         runtime.active = true
-        val saved = service.save(MonitoringConfiguration(cameraA = VisionConfiguration(geometry = ImageGeometry(90))))
+        val saved = service.save(MonitoringConfiguration(vision = VisionConfiguration(geometry = ImageGeometry(90))))
         assertEquals(ConfigurationApplyOutcome.REQUIRES_STOP, service.apply(saved.revision, saved.revision).outcome)
         assertEquals(ConfigurationRevisions(2, 1), repository.revisions())
         assertTrue(runtime.active)

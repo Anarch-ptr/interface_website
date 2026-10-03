@@ -7,6 +7,33 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MonitoringRuntimeConcurrencyTest {
+    @Test fun repeatedStartResetsAssemblerOnlyForANewSession() = runTest {
+        val single = com.filamentvision.core.measurement.SingleCameraMeasurementAssembler()
+        val resets = mutableListOf<Int>()
+        var accepted = 0
+        val assembler = object : com.filamentvision.core.measurement.MeasurementAssembler {
+            override fun reset() { resets += accepted; accepted = 0; single.reset() }
+            override fun accept(evidence: com.filamentvision.core.vision.CameraMeasurement): List<com.filamentvision.core.model.OfficialMeasurement> {
+                accepted++
+                return single.accept(evidence)
+            }
+        }
+        val h = Harness(backgroundScope, assembler = assembler)
+        val first = h.runtime.start(StartMonitoringCommand("start"))
+        h.send(1); runCurrent()
+        val duplicate = h.runtime.start(StartMonitoringCommand("another-start"))
+        assertEquals(StartOutcome.ALREADY_RUNNING, duplicate.outcome)
+        assertEquals(first.session, duplicate.session)
+        assertEquals(listOf(0), resets)
+        h.runtime.stop(StopMonitoringCommand("stop"))
+        h.runtime.start(StartMonitoringCommand("restart"))
+        h.send(1, 1); runCurrent()
+        h.runtime.stop(StopMonitoringCommand("stop-again"))
+        assertEquals(listOf(0, 1), resets)
+        h.assertFinalized(2, 2)
+        h.runtime.close()
+    }
+
     @Test fun slowWriteDoesNotRestartTheOneSecondPendingMeasurementDeadline() = runTest {
         val h = Harness(backgroundScope)
         val writeStarts = mutableListOf<Long>()
@@ -56,20 +83,21 @@ class MonitoringRuntimeConcurrencyTest {
         assertEquals(listOf(5, 1), h.sink.batchSizes)
     }
 
-    @Test fun injectedPairingAndIdentityCallbacksCanReadRuntimeAndBurstKeepsBatchThreshold() = runTest {
+    @Test fun injectedAssemblerAndIdentityCallbacksCanReadRuntimeAndBurstKeepsBatchThreshold() = runTest {
         lateinit var h: Harness
         val callbackReads = mutableListOf<Boolean>()
         fun readRuntime() {
             callbackReads += runBlocking { withTimeoutOrNull(100) { h.runtime.realtimeMeasurements(); true } } ?: false
         }
-        val pairing = object : com.filamentvision.core.fusion.FramePairingStrategy {
+        val single = com.filamentvision.core.measurement.SingleCameraMeasurementAssembler()
+        val assembler = object : com.filamentvision.core.measurement.MeasurementAssembler {
             override fun reset() { readRuntime() }
-            override fun offer(measurement: com.filamentvision.core.vision.CameraMeasurement): List<com.filamentvision.core.fusion.MeasurementPair> {
+            override fun accept(evidence: com.filamentvision.core.vision.CameraMeasurement): List<com.filamentvision.core.model.OfficialMeasurement> {
                 readRuntime()
-                return List(9) { com.filamentvision.core.fusion.MeasurementPair(measurement, null) }
+                return List(9) { single.accept(evidence).single() }
             }
         }
-        h = Harness(backgroundScope, pairing = pairing, epochMillis = { readRuntime(); 1234L }, sessionId = { readRuntime(); "session" })
+        h = Harness(backgroundScope, assembler = assembler, epochMillis = { readRuntime(); 1234L }, sessionId = { readRuntime(); "session" })
         h.runtime.start(StartMonitoringCommand("start"))
         h.send(1); runCurrent()
         h.runtime.close()
@@ -137,7 +165,7 @@ class MonitoringRuntimeConcurrencyTest {
         assertEquals(8, acceptedDuringWrite)
         h.assertFinalized(8)
         assertEquals(listOf(5, 3), h.sink.batchSizes)
-        assertEquals((0L..7L).toList(), h.sink.measurements.map { it.cameraA!!.sequence })
+        assertEquals((0L..7L).toList(), h.sink.measurements.map { it.evidence.single().sequence })
     }
 
     @Test fun unconfinedStartupPersistenceIsNotInvokedInsideOwnershipTransition() = runTest {
@@ -175,7 +203,7 @@ class MonitoringRuntimeConcurrencyTest {
         assertEquals(MonitoringLifecycle.ERROR, h.runtime.state.value.lifecycle)
         assertEquals(listOf(5, 5, 3), attemptedSizes)
         assertEquals(listOf(5, 3), h.sink.batchSizes)
-        assertEquals((0L..7L).toList(), h.sink.measurements.map { it.cameraA!!.sequence })
+        assertEquals((0L..7L).toList(), h.sink.measurements.map { it.evidence.single().sequence })
         h.assertFinalized(8)
         h.runtime.close()
     }
@@ -244,9 +272,12 @@ class MonitoringRuntimeConcurrencyTest {
         h.send(3); runCurrent()
         h.runtime.stop(StopMonitoringCommand("stop1"))
         val second = h.runtime.start(StartMonitoringCommand("second"))
-        h.send(2, 3, "B"); runCurrent()
+        assertNull(h.runtime.state.value.latestMeasurement)
+        assertEquals(0L, h.runtime.state.value.visionDiagnostics.processedFrames)
+        h.send(2, 3); runCurrent()
         assertNotEquals(first.session, second.session)
-        assertNull(h.runtime.state.value.latestMeasurement!!.cameraA)
+        assertEquals("camera", h.runtime.state.value.latestMeasurement!!.evidence.single().cameraId.value)
+        assertNull(h.runtime.state.value.latestMeasurement!!.legacyFusion)
         h.runtime.stop(StopMonitoringCommand("stop2"))
         h.assertFinalized(5, 2)
         assertEquals(2, h.source.starts.get())
@@ -280,7 +311,7 @@ class MonitoringRuntimeConcurrencyTest {
         h.send(1, 1); runCurrent()
         h.runtime.stop(StopMonitoringCommand("stop2"))
         h.assertFinalized(2, 2)
-        assertEquals(listOf(0L, 1L), h.sink.measurements.map { it.cameraA!!.sequence })
+        assertEquals(listOf(0L, 1L), h.sink.measurements.map { it.evidence.single().sequence })
         h.runtime.close()
     }
 
@@ -298,8 +329,8 @@ class MonitoringRuntimeConcurrencyTest {
         h.send(290, 15); runCurrent()
         val recent = h.runtime.realtimeMeasurements()
         assertEquals(300, recent.size)
-        assertEquals(5L, recent.first().cameraA!!.sequence)
-        assertEquals(304L, recent.last().cameraA!!.sequence)
+        assertEquals(5L, recent.first().evidence.single().sequence)
+        assertEquals(304L, recent.last().evidence.single().sequence)
         h.runtime.stop(StopMonitoringCommand("stop"))
         h.assertFinalized(305)
         h.runtime.close()

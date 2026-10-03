@@ -1,7 +1,7 @@
 package com.filamentvision.core.runtime
 
 import com.filamentvision.core.alarm.AlarmLevel
-import com.filamentvision.core.fusion.FusionReason
+import com.filamentvision.core.model.MeasurementStatus
 import com.filamentvision.core.input.ImageInputState
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.*
@@ -20,24 +20,22 @@ class MonitoringRuntimeFailureTest {
         h.runtime.close()
     }
 
-    @Test fun dualCameraPipelinePreservesWeightedFusionAlarmAndPopulationStatistics() = runTest {
+    @Test fun singleCameraPipelinePreservesEachVisionSampleAlarmAndPopulationStatistics() = runTest {
         val h = Harness(backgroundScope)
         h.runtime.start(StartMonitoringCommand("start"))
         h.source.input.send(Harness.frame(3)); runCurrent()
-        h.source.input.send(Harness.frame(4, "B", width = 5)); runCurrent()
+        h.source.input.send(Harness.frame(4, width = 5)); runCurrent()
         val m = h.runtime.state.value.latestMeasurement!!
-        assertEquals(.475, m.fusedDiameter, 1e-12)
-        assertEquals(.1, m.shapeDifference, 1e-12)
-        assertEquals(FusionReason.BOTH_CAMERAS, m.fusionReason)
-        assertEquals(3L, m.cameraA!!.sequence)
-        assertEquals(4L, m.cameraB!!.sequence)
-        assertEquals(102L, m.cameraA!!.timestamp)
-        assertEquals(103L, m.cameraB!!.timestamp)
+        assertEquals(.5, m.diameterMm, 1e-12)
+        assertNull(m.legacyFusion)
+        assertEquals(MeasurementStatus.NORMAL, m.status)
+        assertEquals(4L, m.evidence.single().sequence)
+        assertEquals(103L, m.evidence.single().timestamp)
         assertEquals(AlarmLevel.CRITICAL, h.runtime.state.value.latestAlarm.level)
         h.runtime.close()
         val stats = h.sink.finalized.single().statistics
-        assertEquals(.4375, stats.averageDiameter, 1e-12)
-        assertEquals(.0375, stats.standardDeviation, 1e-12)
+        assertEquals(.45, stats.averageDiameter, 1e-12)
+        assertEquals(.05, stats.standardDeviation, 1e-12)
         assertEquals(1.0, stats.averageConfidence, 0.0)
         assertEquals(1, stats.abnormalEventCount)
         assertEquals(m, h.sink.measurements.last())
@@ -115,18 +113,18 @@ class MonitoringRuntimeFailureTest {
         assertEquals(StartOutcome.CLOSED, h.runtime.start(StartMonitoringCommand("closed")).outcome)
     }
 
-    @Test fun runtimePreservesGoldenMetadataNullableEvidenceAndStatistics() = runTest {
+    @Test fun runtimePreservesGoldenVisionMetadataAndNeutralEvidenceStatistics() = runTest {
         val h = Harness(backgroundScope)
         h.runtime.start(StartMonitoringCommand("start"))
         h.source.input.send(Harness.frame(3)); runCurrent()
         val m = h.runtime.state.value.latestMeasurement!!
-        assertEquals(.4, m.fusedDiameter, 0.0)
+        assertEquals(.4, m.diameterMm, 0.0)
         assertEquals(1.0, m.confidence, 0.0)
-        assertEquals("A", m.cameraA!!.cameraId.value)
-        assertEquals(3L, m.cameraA!!.sequence)
+        assertEquals("camera", m.evidence.single().cameraId.value)
+        assertEquals(3L, m.evidence.single().sequence)
         assertEquals(102L, m.timestamp)
-        assertNull(m.cameraB)
-        assertEquals(FusionReason.CAMERA_B_MISSING, m.fusionReason)
+        assertNull(m.legacyFusion)
+        assertEquals(MeasurementStatus.NORMAL, m.status)
         h.runtime.stop(StopMonitoringCommand("stop"))
         assertEquals(.4, h.sink.finalized.single().statistics.averageDiameter, 0.0)
         assertEquals(0.0, h.sink.finalized.single().statistics.standardDeviation, 0.0)

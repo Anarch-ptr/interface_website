@@ -3,7 +3,7 @@ package com.filamentvision.core.runtime
 import com.filamentvision.core.alarm.AlarmTransition
 import com.filamentvision.core.config.*
 import com.filamentvision.core.frame.*
-import com.filamentvision.core.fusion.*
+import com.filamentvision.core.measurement.*
 import com.filamentvision.core.input.*
 import com.filamentvision.core.model.*
 import kotlinx.coroutines.*
@@ -100,7 +100,7 @@ internal class RecordingSink : RuntimePersistence, RuntimeEventSink {
 internal class Harness(
     scope: CoroutineScope,
     cacheCapacity: Int = 16,
-    pairing: FramePairingStrategy = LatestCompatiblePairingStrategy(CameraId("A"), CameraId("B")),
+    assembler: MeasurementAssembler = SingleCameraMeasurementAssembler(),
     epochMillis: () -> Long = { 1234L },
     sessionId: () -> String = { java.util.UUID.randomUUID().toString() },
 ) {
@@ -108,13 +108,11 @@ internal class Harness(
     val sink = RecordingSink()
     val runtime = MonitoringRuntime(
         scope = scope, source = source,
-        configurations = mapOf(CameraId("A") to config, CameraId("B") to config),
-        pairingStrategy = pairing,
-        fusionConfiguration = FusionConfiguration(.25, .75, .7, 100),
+        vision = config, assembler = assembler,
         targetDiameter = .4, persistence = sink, eventSink = sink,
         commandCacheCapacity = cacheCapacity, epochMillis = epochMillis, sessionId = sessionId,
     )
-    suspend fun send(count: Int, first: Long = 0, camera: String = "A") {
+    suspend fun send(count: Int, first: Long = 0, camera: String = "camera") {
         repeat(count) { source.input.send(frame(first + it, camera)) }
     }
     fun assertFinalized(samples: Int, sessions: Int = 1) {
@@ -133,7 +131,7 @@ internal class Harness(
             manualThreshold = 40, edgeSensitivity = 30, minimumPixelWidth = 3,
             maximumPixelWidth = 6, mmPerPixel = .1, minimumConfidence = .5,
         ))
-        fun frame(sequence: Long, camera: String = "A", width: Int = 4, lease: FrameLease = FrameLease()) = CameraFrame(
+        fun frame(sequence: Long, camera: String = "camera", width: Int = 4, lease: FrameLease = FrameLease()) = CameraFrame(
             CameraId(camera), 99 + sequence, 100, 8, 4, PixelFormat.ARGB32,
             PixelBuffer.ints(IntArray(32) {
                 val v = if (it % 8 in 2 until 2 + width) 20 else 100

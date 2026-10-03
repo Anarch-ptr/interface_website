@@ -7,8 +7,10 @@ import com.filamentvision.core.frame.*
 import com.filamentvision.core.fusion.*
 import com.filamentvision.core.input.*
 import com.filamentvision.core.model.*
+import com.filamentvision.core.measurement.MeasurementAssembler
+import com.filamentvision.core.measurement.SingleCameraMeasurementAssembler
 import com.filamentvision.core.session.SessionStatisticsAccumulator
-import com.filamentvision.core.vision.VisionProcessor
+import com.filamentvision.core.vision.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
@@ -24,28 +26,51 @@ import java.util.UUID
 class MonitoringRuntime(
     scope: CoroutineScope,
     private val source: CameraInputSource,
-    configurations: Map<CameraId, VisionConfiguration>,
-    private val pairingStrategy: FramePairingStrategy,
-    private var fusionConfiguration: FusionConfiguration,
+    private var vision: VisionConfiguration,
     private var targetDiameter: Double,
     private val persistence: RuntimePersistence,
     private val eventSink: RuntimeEventSink,
     commandCacheCapacity: Int = 128,
     private val epochMillis: () -> Long = System::currentTimeMillis,
     private val sessionId: () -> String = { UUID.randomUUID().toString() },
-    private val processor: VisionProcessor = VisionProcessor(),
-    private val fusionEngine: FusionEngine = FusionEngine(),
-    private val directDiameterFusionConfidence: Map<CameraId, Double> = emptyMap(),
+    private val processor: VisionAnalyzer = RoiVisionProcessor(),
+    private val assembler: MeasurementAssembler = SingleCameraMeasurementAssembler(),
     realtimeCapacity: Int = 300,
     private var writeBatchSize: Int = 8,
     private var flushIntervalMillis: Long = 1000,
 ) {
+    /** Transitional v1 entry point, isolated until Backend composition migrates in Task 17. */
+    constructor(
+        scope: CoroutineScope,
+        source: CameraInputSource,
+        configurations: Map<CameraId, VisionConfiguration>,
+        pairingStrategy: FramePairingStrategy,
+        fusionConfiguration: FusionConfiguration,
+        targetDiameter: Double,
+        persistence: RuntimePersistence,
+        eventSink: RuntimeEventSink,
+        commandCacheCapacity: Int = 128,
+        epochMillis: () -> Long = System::currentTimeMillis,
+        sessionId: () -> String = { UUID.randomUUID().toString() },
+        processor: VisionProcessor = VisionProcessor(),
+        fusionEngine: FusionEngine = FusionEngine(),
+        directDiameterFusionConfidence: Map<CameraId, Double> = emptyMap(),
+        realtimeCapacity: Int = 300,
+        writeBatchSize: Int = 8,
+        flushIntervalMillis: Long = 1000,
+    ) : this(scope, source, VisionConfiguration(), targetDiameter, persistence, eventSink,
+        commandCacheCapacity, epochMillis, sessionId, processor,
+        LegacyFusionAssembler(pairingStrategy, fusionConfiguration, fusionEngine),
+        realtimeCapacity, writeBatchSize, flushIntervalMillis) {
+        legacyInput = LegacyInput(configurations.toMap(), directDiameterFusionConfidence.toMap())
+    }
+
     init {
         require(targetDiameter > 0.0)
         require(writeBatchSize > 0)
         require(flushIntervalMillis > 0)
     }
-    private var configurations = configurations.toMap()
+    private var legacyInput: LegacyInput? = null
     private val ownership = RuntimeOwnership(commandCacheCapacity)
     private val processing = Mutex()
     private val writing = Mutex()
@@ -143,13 +168,24 @@ class MonitoringRuntime(
     suspend fun realtimeMeasurements(): List<OfficialMeasurement> = ownership.transition { realtime.snapshot() }
 
     /** Reconfigures this owner only after successful finalization released its reservation. */
+    suspend fun configureWhenStopped(configuration: MonitoringConfiguration): Boolean = reconfigure(configuration)
+
+    /** Transitional overload for the v1 composition only; never switches a single-stream owner. */
     suspend fun configureWhenStopped(configuration: MonitoringConfiguration, cameraA: CameraId, cameraB: CameraId): Boolean {
-        configuration.validate()
         require(cameraA != cameraB)
+        return reconfigure(configuration, cameraA to cameraB)
+    }
+
+    private suspend fun reconfigure(configuration: MonitoringConfiguration, legacyCameras: Pair<CameraId, CameraId>? = null): Boolean {
+        configuration.validate()
         return ownership.transition {
             if (ownership.closed || ownership.current != null) return@transition false
-            configurations = mapOf(cameraA to configuration.cameraA, cameraB to configuration.cameraB)
-            fusionConfiguration = configuration.fusion
+            if (legacyCameras != null) {
+                val legacy = legacyInput ?: return@transition false
+                legacy.configurations = mapOf(legacyCameras.first to configuration.cameraA, legacyCameras.second to configuration.cameraB)
+                (assembler as LegacyFusionAssembler).configuration = configuration.fusion
+            } else if (legacyInput != null) return@transition false
+            vision = configuration.vision
             targetDiameter = configuration.targetDiameter
             writeBatchSize = configuration.writeBatchSize
             flushIntervalMillis = configuration.flushIntervalMillis
@@ -165,7 +201,7 @@ class MonitoringRuntime(
         try {
             withContext(NonCancellable) {
                 reservation.launchGate.await()
-                processing.withLock { pairingStrategy.reset() }
+                processing.withLock { assembler.reset() }
                 persistence.createSession(reservation.session)
                 reservation.created = true
             }
@@ -221,16 +257,30 @@ class MonitoringRuntime(
                 val camera = when (input) {
                     is CameraInput.Image -> {
                         val frame = input.frame
-                        val configuration = requireNotNull(configurations[frame.cameraId]) { "No configuration for ${frame.cameraId}" }
-                        processor.process(frame, configuration).measurement ?: return@withLock
+                        val configuration = legacyInput?.let {
+                            requireNotNull(it.configurations[frame.cameraId]) { "No configuration for ${frame.cameraId}" }
+                        } ?: vision
+                        val result = processor.process(frame, configuration)
+                        val rejected = result.error != null || result.measurement?.valid != true || result.measurement.error != null
+                        ownership.transition {
+                            if (ownership.current === reservation && reservation.accepting) {
+                                val diagnostics = state.value.visionDiagnostics
+                                mutableState.value = state.value.copy(visionDiagnostics = RuntimeVisionDiagnostics(
+                                    processedFrames = diagnostics.processedFrames + 1,
+                                    rejectedFrames = diagnostics.rejectedFrames + if (rejected) 1 else 0,
+                                    lastError = result.error ?: result.measurement?.error,
+                                ))
+                            }
+                        }
+                        if (rejected) return@withLock
+                        requireNotNull(result.measurement)
                     }
-                    is CameraInput.DirectDiameter -> DirectDiameterMeasurementAdapter.toMeasurement(
-                        input.evidence,
-                        directDiameterFusionConfidence[input.cameraId] ?: 1.0,
-                    )
+                    is CameraInput.DirectDiameter -> {
+                        val legacy = legacyInput ?: return@withLock
+                        DirectDiameterMeasurementAdapter.toMeasurement(input.evidence, legacy.directConfidence[input.cameraId] ?: 1.0)
+                    }
                 }
-                for (pair in pairingStrategy.offer(camera)) {
-                    val measurement = fusionEngine.fuseDetailed(pair.cameraA, pair.cameraB, fusionConfiguration)?.measurement ?: continue
+                for (measurement in assembler.accept(camera)) {
                     val flush = ownership.transition {
                         // Revalidate after external processing; stop may have closed acceptance meanwhile.
                         if (ownership.current !== reservation || !reservation.accepting) return@transition false
@@ -342,4 +392,20 @@ class MonitoringRuntime(
     }
 
     private fun publishCacheSize() { mutableState.value = state.value.copy(cachedCommandCount = ownership.cachedCount) }
+}
+
+/** V1 compatibility is kept out of the primary single-camera assembly path. */
+private class LegacyInput(
+    var configurations: Map<CameraId, VisionConfiguration>,
+    val directConfidence: Map<CameraId, Double>,
+)
+
+private class LegacyFusionAssembler(
+    private val pairing: FramePairingStrategy,
+    var configuration: FusionConfiguration,
+    private val fusion: FusionEngine,
+) : MeasurementAssembler {
+    override fun reset() = pairing.reset()
+    override fun accept(evidence: CameraMeasurement): List<OfficialMeasurement> =
+        pairing.offer(evidence).mapNotNull { fusion.fuseDetailed(it.cameraA, it.cameraB, configuration)?.measurement }
 }
