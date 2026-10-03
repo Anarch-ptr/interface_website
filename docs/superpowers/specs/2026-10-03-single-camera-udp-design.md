@@ -125,6 +125,8 @@ Fresh installations use editable, disabled defaults `headerHex="AA 01"` and `foo
 
 The generic `ApplicationFramingParser` may remain for non-production characterization tests, but production source, DTO, persistence and UI no longer expose it.
 
+The envelope and payload selections are Backend expected-input configuration only. This release defines no Raspberry Pi remote-control or configuration channel. Saving or applying `JPEG`, `GRAY8`, `BINARY`, `RGB888`, Header, or Footer values changes how Backend validates and decodes incoming bytes; it does not instruct the Raspberry Pi to change what it sends. A sender/profile mismatch is reported through framing, payload-size, or decode/configuration diagnostics and must never be described as a successfully synchronized Pi configuration.
+
 ## 7. Single UDP input profile
 
 Final Backend model:
@@ -279,6 +281,8 @@ Additional production bounds:
 - preview encoding occurs after FPS admission and remains latest-first/lossy;
 - measurement, alarm, session and error events remain on the reliable path and cannot be dropped by preview/Inspector pressure.
 
+The integration bound applies to the aggregate simultaneous working set, not to each component in isolation. The boundedness gate must account together for reassembly chunks, the current encoded frame, one decoded image, Vision ROI working arrays, Preview working/retained state, the Runtime mailbox, and Inspector preview retention. A real or representative 8MP JPEG/RGB888 workload that cannot remain within these approved bounds is a stop condition supported by measured evidence; implementation must not silently raise a hard limit.
+
 The current Vision pipeline can allocate multiple full-resolution intermediate `IntArray` values. Before optimization, characterization tests must measure its peak retained working set for a deterministic 3840x2160 frame. The migration may replace full-frame intermediate retention with ROI-bounded processing only if Vision golden output remains identical for the configured ROI. The hard gate is bounded memory with one frame, not an assumed frame rate. No implementation may raise the existing 64 MiB decoded or reassembly hard limits to hide pressure.
 
 ## 12. Single-camera measurement boundary
@@ -343,6 +347,8 @@ payloadLength, framePayloadBytes
 
 Parsed Frame view exposes payload format (`JPEG|GRAY8|BINARY|RGB888`), dimensions when known, decode result, completed frame bytes and bounded preview. Header or Footer mismatch updates the raw snapshot with `HEADER_MISMATCH` or `FOOTER_MISMATCH`; it never reaches the structured parser. Source mismatch remains observable only while a lease is active and never enters envelope parsing.
 
+The Raw Hex Preview is a bounded prefix of the complete received Datagram and therefore includes the outer Header and, when the requested bounded preview reaches the end of a short Datagram, its Footer. Parsed Transport metadata is produced only from the stripped 34-byte Structured Header. Outer envelope bytes never alter structured offsets.
+
 ## 15. Backend REST and WebSocket contracts
 
 Retained configuration routes:
@@ -402,6 +408,8 @@ Diagnostics
 
 Packet Inspector
 ```
+
+Labels and help text call Payload Format and Header/Footer the expected input protocol. The page shows saved and currently applied values separately and states that Apply configures Backend parsing only; it does not reconfigure the Raspberry Pi.
 
 JPEG is the default/recommended format. GRAY8, both BINARY packings, RGB/BGR are production options. DIAMETER, Transport Mode, ASCII framing, scope, strip and second Camera card are absent.
 

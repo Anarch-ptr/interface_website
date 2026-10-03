@@ -16,6 +16,7 @@
 - Do not change the 34-byte Structured Transport Header length, offsets, integer widths, unsigned semantics, or Big Endian encoding. Offset 6 remains present and production accepts only compatibility value `1`.
 - Production Datagram layout is exactly `[2-byte HEX Header][34-byte Structured Header][Image Chunk][2-byte HEX Footer]`; envelope validation and stripping precede structured parsing.
 - Production supports only `JPEG`, `GRAY8`, `BINARY`, and `RGB888`, always through `STRUCTURED_CHUNKED`. `DIAMETER`, `SINGLE_DATAGRAM`, arbitrary/ASCII framing, scope, and strip controls are absent from production contracts.
+- Payload format and two-byte Header/Footer are Backend expected-input settings. Save/Apply never claims to configure or synchronize the Raspberry Pi; mismatches produce explicit framing/payload/decode diagnostics.
 - `:core` remains free of Android, Ktor, SQLite/JDBC, Room, Compose, Jackson, AWT, `ImageIO`, and desktop-only image APIs.
 - `MonitoringRuntime` remains the sole producer owner; `activeProducerCount <= 1` and UDP receiver jobs `<= 1` are runtime invariants, not only test assertions.
 - Preview and Inspector are bounded, latest-only observers. Their congestion must never drop an admitted measurement, alarm, session, error, or reliable event.
@@ -506,7 +507,7 @@ interface RaspberryPiUdpInputProfileRepository {
 - Consumes: Task 20 client.
 - Produces: one Settings form with Network, Camera Stream, Advanced Transport, Diagnostics and Packet Inspector sections.
 
-- [ ] Test AUTO/specific interface selection, advertised `IPv4:port`, never 0.0.0.0, optional Pi IPv4, status/last packet, JPEG default, all four conditional formats, two-byte header/footer, read-only protocol v1, Save distinct from Apply, Backend errors, one diagnostics panel, and one Inspector lifecycle.
+- [ ] Test AUTO/specific interface selection, advertised `IPv4:port`, never 0.0.0.0, optional Pi IPv4, status/last packet, JPEG default, all four conditional formats, two-byte header/footer, read-only protocol v1, Save distinct from Apply, saved versus applied expected-input values, explicit copy that Backend Apply does not configure the Pi, mismatch diagnostics, one diagnostics panel, and one Inspector lifecycle.
 - [ ] Run focused new Settings and Inspector tests; expect missing component and current dual cards.
 - [ ] Build accessible controlled form, poll only while mounted, and preserve current monitoring threshold settings separately.
 - [ ] Run focused tests; then run `npm --prefix frontend test`, `npm --prefix frontend run lint`, and `npm --prefix frontend run build` as three separate commands.
@@ -578,7 +579,7 @@ interface RaspberryPiUdpInputProfileRepository {
 - Produces: repeatable loopback sender/gate evidence; no new product feature.
 
 - [ ] Before glue changes, add one real IPv4 socket/port cases for JPEG multi-chunk/out-of-order, GRAY8, both BINARY packings, RGB/BGR, exact valid/invalid envelope, source mismatch plus Inspector, sentinel oversize, missing/duplicate/conflicting/late/timeout chunks, Save/Apply parser swap/format/port restart/bind and CAS rollback, one Preview, Vision-derived diameter, alarm/session reliable events during Preview/Inspector congestion, waiting with no Pi, and one producer/job.
-- [ ] Add bounded tests for a deterministic 3840×2160 frame, 8MP-safe declaration/allocation edges, max two in-flight reassemblies/64 MiB, one decoded permit, capacity-one mailbox, Preview ≤4 MiB, Inspector ≤512 bytes, and retained reassembly/permit/mailbox/Inspector/Preview resources returning to zero or their documented steady bound after stop/restart and lease release.
+- [ ] Add bounded tests for a deterministic 3840×2160 frame, 8MP-safe declaration/allocation edges, max two in-flight reassemblies/64 MiB, one decoded permit, capacity-one mailbox, Preview ≤4 MiB, and Inspector ≤512 bytes. Instrument one overlap scenario in which reassembly chunks, current encoded frame, decoded image, Vision ROI arrays, Preview working/retained state, Runtime mailbox and Inspector preview coexist; assert a deterministic aggregate upper bound and that retained reassembly/permit/mailbox/Inspector/Preview resources return to zero or their documented steady bound after stop/restart and lease release. If measured JPEG/RGB888 evidence exceeds the approved architecture, stop instead of increasing a hard limit.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.e2e.UdpInputEndToEndTest" --tests "com.filamentvision.backend.e2e.LongRunBoundednessTest"`; RED must identify only missing integration wiring, not a new protocol need.
 - [ ] Add only sender/test-composition glue and fix integration defects within approved boundaries. Record measured peak retained categories and producer/job maxima in the verification report.
 - [ ] Run the focused command, then the complete gate:
