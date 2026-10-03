@@ -5,8 +5,16 @@ import com.filamentvision.core.frame.*
 import java.util.Properties
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 
-class VisionGoldenTest {
+@RunWith(Parameterized::class)
+class VisionGoldenTest(private val compact: Boolean) {
+    companion object {
+        @JvmStatic
+        @Parameterized.Parameters(name = "compact={0}")
+        fun processors() = listOf(arrayOf(false), arrayOf(true))
+    }
     @Test
     fun darkStripCatchesPolarityWidthCalibrationMetadataAndTimingDrift() {
         val fixture = Properties().apply {
@@ -185,9 +193,10 @@ class VisionGoldenTest {
         assertEquals(3L, result.sequence)
     }
 
-    private fun processor(): VisionProcessor {
+    private fun processor(): VisionAnalyzer {
         var now = 0L
-        return VisionProcessor(clock = NanoClock { now.also { now += 10 } })
+        val clock = NanoClock { now.also { now += 10 } }
+        return if (compact) RoiVisionProcessor(clock = clock) else VisionProcessor(clock = clock)
     }
     private fun configuration() = VisionConfiguration(calibration = calibration())
     private fun calibration() = CalibrationProfile(

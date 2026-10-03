@@ -9,8 +9,8 @@ class VisionProcessor(
     private val thresholdProcessor: ThresholdProcessor = ThresholdProcessor(),
     private val edgeMapProcessor: EdgeMapProcessor = EdgeMapProcessor(),
     private val detectionPipeline: DetectionPipeline = DetectionPipeline(),
-) {
-    fun process(frame: CameraFrame, configuration: VisionConfiguration, decodeNanos: Long = 0): VisionResult {
+) : VisionAnalyzer {
+    override fun process(frame: CameraFrame, configuration: VisionConfiguration, decodeNanos: Long): VisionResult {
         val totalStart = clock.nanoTime()
         val geometryStart = clock.nanoTime()
         val transformed = ImageGeometryTransformer.transform(frame, configuration.geometry)
