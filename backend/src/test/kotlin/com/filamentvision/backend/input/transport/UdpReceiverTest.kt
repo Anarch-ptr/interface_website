@@ -1,5 +1,7 @@
 package com.filamentvision.backend.input.transport
 
+import com.filamentvision.backend.input.framing.DatagramEnvelopeParser
+import com.filamentvision.backend.input.framing.EnvelopeParseResult
 import com.filamentvision.backend.input.profile.ApplicationFramingProfile
 import com.filamentvision.backend.input.profile.DiameterByteOrder
 import com.filamentvision.backend.input.profile.DiameterValueEncoding
@@ -12,6 +14,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -25,6 +28,94 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 
 class UdpReceiverTest {
+    @Test
+    fun receivesMaximumLegalStructuredEnvelopeWithoutTruncation() = runBlocking {
+        val observedSize = CompletableDeferred<Int>()
+        val outcome = CompletableDeferred<Any>()
+        val wire = envelopedChunk(1_400)
+        val parser = DatagramEnvelopeParser(byteArrayOf(0xAA.toByte(), 1), byteArrayOf(13, 10))
+        val receiver = UdpReceiver(
+            profile = structuredProfile(freePort(), 1_400),
+            envelopeBytes = 4,
+            observer = object : UdpReceiverObserver {
+                override fun onReceived(size: Int, receivedAtMonotonicNanos: Long) { observedSize.complete(size) }
+                override fun onDropped(reason: UdpReceiverDropReason) { outcome.complete(reason) }
+            },
+        ) {
+            val parsed = parser.parse(it.bytes)
+            outcome.complete(if (parsed is EnvelopeParseResult.Accepted) it.bytes.copyOwned() else parsed)
+        }
+        try {
+            receiver.start()
+            send(receiver.localAddress.port, wire)
+            val result = withTimeout(3_000) { outcome.await() }
+            assertEquals(1_438, observedSize.await())
+            assertTrue(result is ByteArray)
+            assertArrayEquals(wire, result as ByteArray)
+        } finally {
+            receiver.stop()
+        }
+    }
+
+    @Test
+    fun exactStructuredEnvelopeSentinelIsDroppedBeforeParser() = runBlocking {
+        assertStructuredEnvelopeDropped(ByteArray(1_439), 1_439)
+    }
+
+    @Test
+    fun oversizedStructuredEnvelopeIsDroppedBeforeParserAfterTruncation() = runBlocking {
+        assertStructuredEnvelopeDropped(ByteArray(2_000), 1_439)
+    }
+
+    private suspend fun assertStructuredEnvelopeDropped(wire: ByteArray, expectedReceivedSize: Int) {
+        val dropped = CompletableDeferred<Pair<UdpReceiverDropReason, Int>>()
+        var parserCalls = 0
+        val parser = DatagramEnvelopeParser(byteArrayOf(0xAA.toByte(), 1), byteArrayOf(13, 10))
+        val receiver = UdpReceiver(
+            profile = structuredProfile(freePort(), 1_400),
+            envelopeBytes = 4,
+            observer = object : UdpReceiverObserver {
+                override fun onDropped(reason: UdpReceiverDropReason, datagram: ReceivedDatagram) {
+                    dropped.complete(reason to datagram.size)
+                }
+            },
+        ) {
+            parserCalls++
+            parser.parse(it.bytes)
+        }
+        try {
+            receiver.start()
+            send(receiver.localAddress.port, wire)
+            val result = withTimeout(3_000) { dropped.await() }
+            assertEquals(UdpReceiverDropReason.DATAGRAM_TOO_LARGE_OR_TRUNCATED, result.first)
+            assertEquals(expectedReceivedSize, result.second)
+        } finally {
+            receiver.stop()
+        }
+        assertEquals(0, parserCalls)
+    }
+
+    private fun structuredProfile(port: Int, maxChunkPayloadBytes: Int): UdpInputProfile =
+        profile(port).copy(
+            transportMode = TransportMode.STRUCTURED_CHUNKED,
+            payload = PayloadProfile.Gray8(10, 10),
+            transportLimits = TransportLimits(maxChunkPayloadBytes = maxChunkPayloadBytes),
+        )
+
+    private fun envelopedChunk(payloadBytes: Int): ByteArray =
+        byteArrayOf(0xAA.toByte(), 1) + StructuredTransportCodec.encode(
+            StructuredTransportHeader(
+                cameraId = UdpCameraId.A,
+                frameId = 1uL,
+                chunkIndex = 0,
+                chunkCount = 1,
+                sourceTimestampMicros = 0,
+                payloadLength = payloadBytes,
+                framePayloadBytes = payloadBytes.toLong(),
+            ),
+            ByteArray(payloadBytes) { 7 },
+        ) + byteArrayOf(13, 10)
+
     @Test
     fun bindsIpv4AnyAddressAndClosesCleanly() = runBlocking {
         val receiver = UdpReceiver(profile(port = freePort())) { }

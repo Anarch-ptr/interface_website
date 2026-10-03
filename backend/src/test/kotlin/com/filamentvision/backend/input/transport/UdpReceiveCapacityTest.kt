@@ -16,6 +16,50 @@ import org.junit.Test
 
 class UdpReceiveCapacityTest {
     @Test
+    fun structuredEnvelopeCapacityIncludesBothTwoByteBoundaries() {
+        val capacity = UdpReceiveCapacityCalculator.forProfile(
+            profile(TransportMode.STRUCTURED_CHUNKED, limits(maxChunkPayloadBytes = 1_400)),
+            envelopeBytes = 4,
+        )
+
+        assertEquals(1_438, capacity.acceptedLimit)
+        assertEquals(1_439, capacity.receiveCapacity)
+        assertTrue(capacity.sentinelEnabled)
+    }
+
+    @Test
+    fun structuredEnvelopeSentinelStopsAtIpv4PayloadCeiling() {
+        val below = UdpReceiveCapacityCalculator.forProfile(
+            profile(TransportMode.STRUCTURED_CHUNKED, limits(maxChunkPayloadBytes = 65_468)),
+            envelopeBytes = 4,
+        )
+        assertEquals(65_506, below.acceptedLimit)
+        assertEquals(65_507, below.receiveCapacity)
+        assertTrue(below.sentinelEnabled)
+
+        for (chunkBytes in listOf(65_469, 65_470)) {
+            val capped = UdpReceiveCapacityCalculator.forProfile(
+                profile(TransportMode.STRUCTURED_CHUNKED, limits(maxChunkPayloadBytes = chunkBytes)),
+                envelopeBytes = 4,
+            )
+            assertEquals(65_507, capped.acceptedLimit)
+            assertEquals(65_507, capped.receiveCapacity)
+            assertFalse(capped.sentinelEnabled)
+        }
+    }
+
+    @Test
+    fun explicitEnvelopeBytesAreCountedAndNegativeLengthsAreRejected() {
+        val structured = profile(TransportMode.STRUCTURED_CHUNKED, limits())
+        val capacity = UdpReceiveCapacityCalculator.forProfile(structured, envelopeBytes = 8)
+        assertEquals(1_442, capacity.acceptedLimit)
+        assertEquals(1_443, capacity.receiveCapacity)
+        assertThrows(IllegalArgumentException::class.java) {
+            UdpReceiveCapacityCalculator.forProfile(structured, envelopeBytes = -1)
+        }
+    }
+
+    @Test
     fun structuredCapacityIncludesFixedHeaderAndPreFramingPayloadLimit() {
         val capacity = UdpReceiveCapacityCalculator.forProfile(
             profile(

@@ -61,11 +61,12 @@ class UdpReceiver(
     private val monotonicClock: MonotonicClock = MonotonicClock(System::nanoTime),
     private val epochClock: EpochClock = EpochClock(System::currentTimeMillis),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    envelopeBytes: Int = 0,
     private val consumer: UdpDatagramConsumer,
 ) {
     private val lifecycle = Mutex()
     private val sourceFilter = Ipv4SourceFilter(profile.sourceIp)
-    val receiveCapacity: UdpReceiveCapacity = UdpReceiveCapacityCalculator.forProfile(profile)
+    val receiveCapacity: UdpReceiveCapacity = UdpReceiveCapacityCalculator.forProfile(profile, envelopeBytes)
 
     @Volatile
     var state: UdpReceiverState = UdpReceiverState.IDLE

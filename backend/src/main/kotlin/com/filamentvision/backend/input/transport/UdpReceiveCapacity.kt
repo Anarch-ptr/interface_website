@@ -15,7 +15,11 @@ data class UdpReceiveCapacity(
 object UdpReceiveCapacityCalculator {
     const val IPV4_UDP_PAYLOAD_MAX = 65_507
 
-    fun forProfile(profile: UdpInputProfile): UdpReceiveCapacity {
+    fun forProfile(profile: UdpInputProfile): UdpReceiveCapacity = forProfile(profile, envelopeBytes = 0)
+
+    /** Envelope bytes are outside the structured payload and existing application framing limits. */
+    fun forProfile(profile: UdpInputProfile, envelopeBytes: Int): UdpReceiveCapacity {
+        require(envelopeBytes >= 0)
         val accepted = when (profile.transportMode) {
             TransportMode.STRUCTURED_CHUNKED -> checkedAdd(
                 StructuredTransportCodec.HEADER_BYTES.toLong(),
@@ -26,7 +30,7 @@ object UdpReceiveCapacityCalculator {
                 strippedDatagramFramingBytes(profile.applicationFraming),
             )
         }
-        return calculate(accepted)
+        return calculate(checkedAdd(accepted, envelopeBytes.toLong()))
     }
 
     internal fun checkedSingleDatagramLimit(maxFrameBytes: Long, strippedFramingBytes: Long): Long {
