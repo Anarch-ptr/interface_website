@@ -25,7 +25,7 @@ object DiagnosticClient {
         }
         val base = URI(options["--base-url"] ?: "http://127.0.0.1:8080")
         require(base.scheme in setOf("http", "https") && base.host != null && base.userInfo == null && base.query == null && base.fragment == null && base.path in setOf("", "/"))
-        val device = options["--device"] ?: "simulator-1"
+        val device = options["--device"] ?: "filamentvision-1"
         require(device.matches(Regex("[A-Za-z0-9_-]{1,100}")))
         val seconds = (options["--observe-seconds"] ?: "3").toLong()
         require(seconds in 1..3600)

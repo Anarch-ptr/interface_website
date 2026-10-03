@@ -11,6 +11,16 @@ class LatestFrameSnapshotCacheTest {
     private val c = a.copy(stage = PreviewStage.EDGE)
     private fun frame(key: PreviewKey, size: Int) = EncodedSnapshot(key, 123, 45, "image/png", ByteArray(size) { it.toByte() })
 
+    @Test fun clearReleasesEveryEntryAndResetsByteAccounting() {
+        val cache = LatestFrameSnapshotCache(2, 100)
+        cache.put(frame(a, 3)); cache.put(frame(b, 5))
+        cache.clear(); cache.clear()
+        assertEquals(SnapshotCacheState(0, 0), cache.state())
+        assertNull(cache.get(a)); assertNull(cache.get(b))
+        cache.put(frame(c, 4))
+        assertEquals(SnapshotCacheState(1, 4), cache.state())
+    }
+
     @Test fun entryEvictionUsesWriteOrderAndReadsDoNotRefreshIt() {
         val cache = LatestFrameSnapshotCache(2, 100)
         cache.put(frame(a, 1)); cache.put(frame(b, 1)); cache.get(a); cache.put(frame(c, 1))

@@ -22,10 +22,9 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
             // This composition has no per-sample live-revision barrier. No configuration
             // is advertised as live-compatible while an authoritative reservation exists.
             override val configuration get() = c.applied.takeUnless { monitoringActive }
-            override fun publishConfiguration(configuration: MonitoringConfiguration) { c.applied = configuration }
+            override fun publishConfiguration(configuration: MonitoringConfiguration) { c.applied = configuration.copy(legacy = null) }
         })
     })
-    private val udpService = UdpInputConfigurationService(c.udpProfileRepository, c.udpInputRouter)
     private fun device(id: String) { if (id != c.deviceId) missing() }
     private fun missing(): Nothing = throw ApplicationFailure(ApplicationFailureCode.NOT_FOUND)
     private fun conflict(): Nothing = throw ApplicationFailure(ApplicationFailureCode.CONFLICT)
@@ -77,75 +76,50 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
     }
     private suspend fun configurationChanged(result: ConfigurationApplyResult?): ConfigurationView {
         if (result?.outcome == ConfigurationApplyOutcome.APPLIED && c.runtime.state.value.activeSession == null)
-            check(c.runtime.configureWhenStopped(c.applied, c.a, c.b))
+            check(c.runtime.configureWhenStopped(c.applied))
         val resultView = c.io { view(result?.outcome) }
         c.publishConfiguration(resultView.revisions)
         return resultView
     }
     override suspend fun save(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView {
-        device(deviceId); return dedup("save", commandId) { c.io { service.save(configuration) }; configurationChanged(null) }
+        device(deviceId); return dedup("save", commandId) { c.io { service.save(configuration.copy(legacy = null)) }; configurationChanged(null) }
     }
     override suspend fun apply(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): ConfigurationView {
         device(deviceId); return dedup("apply", commandId) { configurationChanged(c.io { service.apply(revision, expectedSavedRevision) }) }
     }
     override suspend fun saveAndApply(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView {
-        device(deviceId); return dedup("saveAndApply", commandId) { configurationChanged(c.io { service.saveAndApply(configuration) }) }
+        device(deviceId); return dedup("saveAndApply", commandId) { configurationChanged(c.io { service.saveAndApply(configuration.copy(legacy = null)) }) }
     }
-    private suspend fun udpView(outcome: UdpApplyOutcome? = null): UdpInputConfigurationView = c.io {
-        val saved = c.udpProfileRepository.latest()
-        UdpInputConfigurationView(saved.revision, c.udpProfileRepository.appliedRevision(), saved.profiles, outcome)
-    }
-    override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView {
-        device(deviceId); return udpView()
-    }
-    override suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView {
-        device(deviceId); return dedup("saveUdpInput", commandId) { c.io { udpService.save(profiles) }; udpView() }
-    }
-    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
-        expectedSavedRevision: Long): UdpInputConfigurationView {
-        device(deviceId); return dedup("applyUdpInput", commandId) {
-            when (val result = c.io { udpService.apply(revision, expectedSavedRevision) }) {
-                is UdpApplyResult -> when (result.outcome) {
-                    UdpApplyOutcome.APPLIED -> udpView(result.outcome)
-                    UdpApplyOutcome.CONFLICT -> throw ApplicationFailure(ApplicationFailureCode.CONFLICT)
-                    UdpApplyOutcome.NOT_FOUND -> missing()
-                    UdpApplyOutcome.INVALID -> throw ApplicationFailure(ApplicationFailureCode.INVALID)
-                }
-            }
-        }
-    }
-    override suspend fun udpDiagnostics(deviceId: String, cameraId: String): com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot {
-        val camera = udpCamera(deviceId, cameraId)
-        return (c.inputSource as? UdpCameraInputSource)?.udpDiagnostics(camera)
-            ?: c.udpDiagnostics.getValue(camera).snapshot()
-    }
-    private fun udpCamera(deviceId: String, cameraId: String): com.filamentvision.backend.input.profile.UdpCameraId {
+    // The old REST/Inspector signatures remain until Tasks 18/19. They must not project
+    // the single stream into invented A/B profiles or mutate historical UDP revisions.
+    private fun unavailableUdp(deviceId: String): Nothing {
         device(deviceId)
-        return when (cameraId) {
-            "A" -> com.filamentvision.backend.input.profile.UdpCameraId.A
-            "B" -> com.filamentvision.backend.input.profile.UdpCameraId.B
-            else -> missing()
-        }
+        throw ApplicationFailure(ApplicationFailureCode.UNAVAILABLE)
     }
-    override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int) =
-        c.packetInspector.createLease(udpCamera(deviceId, cameraId), previewBytes)
-    override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String) {
-        if (!c.packetInspector.releaseLease(leaseId, udpCamera(deviceId, cameraId))) missing()
-    }
-    override suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int) =
-        c.packetInspector.latest(leaseId, udpCamera(deviceId, cameraId), previewBytes) ?: missing()
+    override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView = unavailableUdp(deviceId)
+    override suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView =
+        unavailableUdp(deviceId)
+    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
+        expectedSavedRevision: Long): UdpInputConfigurationView = unavailableUdp(deviceId)
+    override suspend fun udpDiagnostics(deviceId: String, cameraId: String): com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot =
+        unavailableUdp(deviceId)
+    override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): com.filamentvision.backend.input.inspector.PacketInspectorLease =
+        unavailableUdp(deviceId)
+    override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String): Unit = unavailableUdp(deviceId)
+    override suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): com.filamentvision.backend.input.inspector.PacketInspectorSnapshot =
+        unavailableUdp(deviceId)
     override suspend fun createDraft(deviceId: String, commandId: String, cameraId: String, configuration: VisionConfiguration): DraftView {
-        device(deviceId); if (cameraId !in setOf("A", "B")) missing()
+        device(deviceId); if (cameraId != c.camera.value) missing()
         return dedup("createDraft", commandId) {
-            MonitoringConfiguration(cameraA = configuration, cameraB = configuration).validate()
-            if (drafts.size >= 2) conflict()
+            MonitoringConfiguration(vision = configuration).validate()
+            if (drafts.size >= 1) conflict()
             DraftView(UUID.randomUUID().toString(), cameraId, 1, configuration).also { drafts[it.id] = it }
         }
     }
     override suspend fun updateDraft(deviceId: String, draftId: String, commandId: String, expectedRevision: Long, configuration: VisionConfiguration): DraftView {
         device(deviceId); return dedup("updateDraft:$draftId", commandId) {
             val old = drafts[draftId] ?: missing(); if (old.revision != expectedRevision) conflict()
-            MonitoringConfiguration(cameraA = configuration, cameraB = configuration).validate()
+            MonitoringConfiguration(vision = configuration).validate()
             old.copy(revision = old.revision + 1, configuration = configuration).also { drafts[draftId] = it }
         }
     }

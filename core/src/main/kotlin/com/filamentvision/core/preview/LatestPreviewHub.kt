@@ -45,6 +45,7 @@ class LatestPreviewHub(keys: Set<PreviewKey>, private val maxPayloadBytes: Int, 
     private var delivered = 0L
     private var dropped = 0L
     private var replacedLatest = 0L
+    private var closed = false
 
     init {
         require(allowedKeys.isNotEmpty() && allowedKeys.all { it.deviceId.isNotBlank() })
@@ -52,6 +53,7 @@ class LatestPreviewHub(keys: Set<PreviewKey>, private val maxPayloadBytes: Int, 
     }
 
     fun publish(frame: PreviewFrame): Unit = synchronized(lock) {
+        check(!closed) { "Preview hub is closed" }
         require(frame.key in allowedKeys) { "Unknown preview key" }
         require(frame.payloadSize <= maxPayloadBytes) { "Preview payload exceeds configured byte limit" }
         published++
@@ -76,6 +78,7 @@ class LatestPreviewHub(keys: Set<PreviewKey>, private val maxPayloadBytes: Int, 
         require(requested.isNotEmpty() && allowedKeys.containsAll(requested)) { "Unknown or empty preview keys" }
         return flow {
             val subscriber = synchronized(lock) {
+                if (closed) return@flow
                 check(subscribers.size < maxSubscribers) { "Preview subscriber limit reached" }
                 Subscriber(requested).also { subscriber ->
                     latest.filterKeys { it in requested }.forEach { (key, frame) -> subscriber.pending[key] = frame }
@@ -87,7 +90,7 @@ class LatestPreviewHub(keys: Set<PreviewKey>, private val maxPayloadBytes: Int, 
                 while (true) {
                     // Even an Unconfined collector must resume away from trySend's publisher.
                     // Only the wakeup crosses dispatchers: there is no extra frame buffer.
-                    withContext(Dispatchers.Default) { subscriber.wakeup.receive() }
+                    if (withContext(Dispatchers.Default) { subscriber.wakeup.receiveCatching() }.isClosed) return@flow
                     while (true) {
                         val frame = synchronized(lock) {
                             subscriber.pending.keys.lastOrNull()?.let { key ->
@@ -106,6 +109,19 @@ class LatestPreviewHub(keys: Set<PreviewKey>, private val maxPayloadBytes: Int, 
                 }
             }
         }
+    }
+
+    /** Called after the producer stops. In-flight consumer frames remain consumer-owned. */
+    fun close(): Unit = synchronized(lock) {
+        if (closed) return@synchronized
+        closed = true
+        latest.clear()
+        for (subscriber in subscribers) {
+            dropped += subscriber.pending.size
+            subscriber.pending.clear()
+            subscriber.wakeup.close()
+        }
+        subscribers.clear()
     }
 
     val metrics: PreviewHubMetrics get() = synchronized(lock) {

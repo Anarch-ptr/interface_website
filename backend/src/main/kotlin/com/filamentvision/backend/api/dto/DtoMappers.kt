@@ -14,8 +14,10 @@ import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
 
 private fun Double.safe(): Double? = takeIf { isFinite() }
 fun CameraMeasurement.toDto() = CameraMeasurementDto(cameraId.value, timestamp, sequence, pixelWidth?.safe(), diameterMm.safe(), confidence.safe(), valid, source.name)
-fun OfficialMeasurement.toDto() = MeasurementDto(cameraA?.toDto(), cameraB?.toDto(), cameraA?.diameterMm?.safe(), cameraB?.diameterMm?.safe(),
-    fusedDiameter.safe(), shapeDifference.safe(), confidence.safe(), status.name, fusionReason.name, timestamp)
+// Keep the old transport vocabulary until the API migration, without inventing legacy fusion fields.
+fun OfficialMeasurement.toDto() = MeasurementDto(legacyFusion?.cameraA?.toDto(), legacyFusion?.cameraB?.toDto(),
+    legacyFusion?.cameraA?.diameterMm?.safe(), legacyFusion?.cameraB?.diameterMm?.safe(),
+    diameterMm.safe(), legacyFusion?.shapeDifference?.safe(), confidence.safe(), status.name, legacyFusion?.fusionReason?.name, timestamp)
 fun MeasurementRecord.toDto() = MeasurementRecordDto(id, sessionId, appliedRevision, measurement.toDto())
 fun RuntimeSession.toDto() = SessionDto(id, startedAtEpochMillis, null, null, null)
 fun SessionRecord.toDto() = SessionDto(session.id, session.startedAtEpochMillis, finalization?.endedAtEpochMillis,

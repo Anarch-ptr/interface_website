@@ -1,5 +1,7 @@
 package com.filamentvision.backend.simulator
 
+import com.filamentvision.backend.simulator.fixtures.*
+
 import com.filamentvision.core.frame.CameraFrame
 import com.filamentvision.core.frame.CameraId
 import com.filamentvision.core.frame.FrameLease

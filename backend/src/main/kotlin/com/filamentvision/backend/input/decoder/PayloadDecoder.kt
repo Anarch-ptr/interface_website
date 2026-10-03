@@ -4,7 +4,6 @@ import com.filamentvision.backend.adapter.DecodedImage
 
 sealed interface DecodedInput {
     data class Image(val image: DecodedImage) : DecodedInput
-    data class DirectDiameter(val evidence: DecodedDiameter) : DecodedInput
 }
 
 enum class PayloadDecodeError {

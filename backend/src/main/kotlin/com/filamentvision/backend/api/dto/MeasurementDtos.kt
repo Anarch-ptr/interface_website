@@ -4,7 +4,7 @@ data class CameraMeasurementDto(val cameraId: String, val timestamp: Long, val s
     val pixelWidth: Double?, val diameterMm: Double?, val confidence: Double?, val valid: Boolean, val source: String)
 data class MeasurementDto(val cameraA: CameraMeasurementDto?, val cameraB: CameraMeasurementDto?,
     val diameterA: Double?, val diameterB: Double?, val fusedDiameter: Double?, val shapeDifference: Double?,
-    val confidence: Double?, val status: String, val fusionReason: String, val timestamp: Long)
+    val confidence: Double?, val status: String, val fusionReason: String?, val timestamp: Long)
 data class MeasurementRecordDto(val id: String, val sessionId: String, val appliedRevision: Long?, val measurement: MeasurementDto)
 data class PageDto<T>(val items: List<T>, val nextCursor: String?)
 data class SessionDto(val id: String, val startedAt: Long, val endedAt: Long?, val finalizationReason: String?, val statistics: StatisticsDto?)

@@ -1,5 +1,7 @@
 package com.filamentvision.backend.simulator
 
+import com.filamentvision.backend.simulator.fixtures.*
+
 import com.filamentvision.core.config.CalibrationProfile
 import com.filamentvision.core.config.VisionConfiguration
 import com.filamentvision.core.frame.CameraFrame

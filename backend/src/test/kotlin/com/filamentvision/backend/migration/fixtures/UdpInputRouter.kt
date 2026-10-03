@@ -1,4 +1,4 @@
-package com.filamentvision.backend.input.runtime
+package com.filamentvision.backend.migration.fixtures
 
 import com.filamentvision.backend.input.profile.*
 import kotlinx.coroutines.sync.Mutex
@@ -29,7 +29,7 @@ class UdpInputRouter(
     suspend fun prepareAndSwap(revision: Long, candidate: UdpInputProfileSet): SwapToken = mutex.withLock {
         val validation = UdpInputProfileValidator().validate(candidate)
         require(validation.isValid) { validation.errors.joinToString { "${it.path}: ${it.message}" } }
-        listOf(candidate.cameraA, candidate.cameraB).forEach(CompiledUdpInputProfile::compile)
+        // Historical revision/CAS fixture only: no retired UDP processing chain is instantiated.
         if (revision == appliedRevision && candidate == effectiveProfiles) return@withLock SwapToken.noop(this)
 
         val old = effectiveProfiles

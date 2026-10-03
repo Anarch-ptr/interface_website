@@ -1,4 +1,4 @@
-package com.filamentvision.backend.simulator
+package com.filamentvision.backend.simulator.fixtures
 
 enum class SimulationScenario {
     NORMAL, HIGH_DIAMETER, LOW_DIAMETER, CAMERA_A_ONLY, CAMERA_B_ONLY, CAMERA_MISMATCH, TIMESTAMP_MISMATCH,

@@ -1,5 +1,6 @@
 package com.filamentvision.backend.e2e
 
+import com.filamentvision.backend.simulator.fixtures.*
 import com.filamentvision.backend.*
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -14,7 +15,7 @@ class DiagnosticClientTest {
     @get:Rule val temporary = TemporaryFolder()
     @Test fun diagnosticUsesActualHttpAndWebsocketAndStopsItsSession() = runBlocking {
         val c = BackendComposition.open(temporary.root.toPath().resolve("diagnostic.db"), temporary.root.toPath().resolve("objects"),
-            inputSourceFactory = com.filamentvision.backend.input.runtime.SimulatorBackendInputSourceFactory)
+            inputSourceFactory = com.filamentvision.backend.simulator.fixtures.SimulatorBackendInputSourceFactory)
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) { installBackend(c) }.start(false)
         try {
             val port = engine.engine.resolvedConnectors().single().port

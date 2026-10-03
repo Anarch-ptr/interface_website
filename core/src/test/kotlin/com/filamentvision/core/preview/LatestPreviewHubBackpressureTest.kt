@@ -14,6 +14,35 @@ class LatestPreviewHubBackpressureTest {
     private val otherCamera = raw.copy(cameraId = CameraId("B"))
     private val otherDevice = raw.copy(deviceId = "other")
 
+    @Test fun closeReleasesRetainedAndPendingFramesAndCompletesSubscribers() = runBlocking {
+        val hub = LatestPreviewHub(setOf(raw), 4, 2)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val blocked = launch { hub.frames(setOf(raw)).collect { entered.complete(Unit); release.await() } }
+        awaitCondition { hub.metrics.subscribers == 1 }
+        hub.publish(frame(1)); entered.await()
+        hub.publish(frame(2))
+        assertEquals(1, hub.metrics.pendingFrames)
+        hub.close(); hub.close()
+        assertEquals(0, hub.metrics.retainedFrames)
+        assertEquals(0, hub.metrics.pendingFrames)
+        assertEquals(0, hub.metrics.subscribers)
+        assertNull(hub.latest(raw))
+        assertThrows(IllegalStateException::class.java) { hub.publish(frame(3)) }
+        assertTrue(hub.frames(setOf(raw)).toList().isEmpty())
+        release.complete(Unit)
+        withTimeout(5000) { blocked.join() }
+    }
+
+    @Test fun closeWakesAnIdleSubscriberWithoutAnotherPublication() = runBlocking {
+        val hub = LatestPreviewHub(setOf(raw), 4, 1)
+        val observer = launch { hub.frames(setOf(raw)).collect { fail("No frame was published") } }
+        awaitCondition { hub.metrics.subscribers == 1 }
+        hub.close()
+        withTimeout(5000) { observer.join() }
+        assertEquals(0, hub.metrics.subscribers)
+    }
+
     @Test fun blockedPreviewConsumerDropsOldOnlyAndCannotBlockReliablePublication() = runBlocking {
         val preview = LatestPreviewHub(setOf(raw), 4, 1)
         val reliable = SequencedEventHub(setOf("device"), 5)

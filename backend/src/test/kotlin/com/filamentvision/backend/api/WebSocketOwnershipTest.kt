@@ -2,7 +2,7 @@ package com.filamentvision.backend.api
 
 import com.filamentvision.backend.application.*
 import com.filamentvision.backend.preview.PngPreviewEncoder
-import com.filamentvision.backend.simulator.SimulatorImageInputSource
+import com.filamentvision.backend.simulator.fixtures.SimulatorImageInputSource
 import com.filamentvision.core.alarm.AlarmTransition
 import com.filamentvision.core.config.*
 import com.filamentvision.core.event.SequencedEventHub

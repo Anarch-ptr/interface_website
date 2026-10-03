@@ -1,7 +1,7 @@
 package com.filamentvision.backend.input.diagnostics
 
 import com.filamentvision.backend.input.profile.TransportMode
-import com.filamentvision.backend.input.runtime.UdpProcessingStage
+import com.filamentvision.backend.input.diagnostics.UdpProcessingStage
 import java.util.concurrent.Executors
 import org.junit.Assert.*
 import org.junit.Test

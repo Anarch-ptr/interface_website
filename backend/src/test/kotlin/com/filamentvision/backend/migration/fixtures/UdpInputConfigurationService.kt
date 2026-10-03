@@ -1,10 +1,11 @@
-package com.filamentvision.backend.input.runtime
+package com.filamentvision.backend.migration.fixtures
+
+import com.filamentvision.backend.input.runtime.UdpApplyOutcome
 
 import com.filamentvision.backend.input.profile.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-enum class UdpApplyOutcome { APPLIED, CONFLICT, NOT_FOUND, INVALID }
 data class UdpApplyResult(val outcome: UdpApplyOutcome, val revision: Long? = null)
 
 class UdpInputConfigurationService(

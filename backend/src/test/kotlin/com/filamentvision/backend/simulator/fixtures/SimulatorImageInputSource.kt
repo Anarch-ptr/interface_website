@@ -1,4 +1,4 @@
-package com.filamentvision.backend.simulator
+package com.filamentvision.backend.simulator.fixtures
 
 import com.filamentvision.core.frame.CameraFrame
 import com.filamentvision.core.frame.CameraId

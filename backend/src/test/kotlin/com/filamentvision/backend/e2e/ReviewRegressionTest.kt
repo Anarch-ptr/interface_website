@@ -6,7 +6,7 @@ import com.filamentvision.core.event.*
 import com.filamentvision.core.model.OfficialMeasurement
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
-import com.filamentvision.backend.simulator.SimulationScenario
+import com.filamentvision.backend.simulator.fixtures.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
 @Suppress("OPT_IN_TO_INHERITANCE") // Test-owned forwarding flow only; no production subclass.
 class ReviewRegressionTest {
     @get:Rule val temporary = TemporaryFolder()
-    private val device = "simulator-1"
+    private val device = "filamentvision-1"
     // Test-owned interception opens otherwise instruction-sized race windows. Production
     // runtime, simulator, persistence, event hub and facade remain the actual composition.
     private fun field(owner: Any, name: String) = owner.javaClass.getDeclaredField(name).also { it.isAccessible = true }
@@ -32,7 +32,7 @@ class ReviewRegressionTest {
 
     @Test fun snapshotDoesNotExposeRuntimeAdvanceBeforeItsStatePublication() = runTest {
         val d = StandardTestDispatcher(testScheduler)
-        val c = BackendComposition.open(temporary.root.toPath().resolve("ahead.db"), temporary.root.toPath().resolve("objects"), d, d)
+        val c = BackendComposition.open(temporary.root.toPath().resolve("ahead.db"), temporary.root.toPath().resolve("objects"), SimulatorBackendInputSourceFactory, d, d)
         try {
             val before = c.application.state(device)
             val starting = async(start = CoroutineStart.UNDISPATCHED) { c.runtime.start(StartMonitoringCommand("start")) }
@@ -56,7 +56,7 @@ class ReviewRegressionTest {
             error("IO did not quiesce")
         }
         val d = StandardTestDispatcher(testScheduler)
-        val opening = async { BackendComposition.open(temporary.root.toPath().resolve("final.db"), temporary.root.toPath().resolve("objects"), d, io) }
+        val opening = async { BackendComposition.open(temporary.root.toPath().resolve("final.db"), temporary.root.toPath().resolve("objects"), SimulatorBackendInputSourceFactory, d, io) }
         pump(); val c = opening.await()
         val owner = field(c.runtime, "ownership").get(c.runtime)
         val ownership = field(owner, "mutex").get(owner) as Mutex
@@ -92,7 +92,7 @@ class ReviewRegressionTest {
 
     @Test fun duplicateStartReturnsOriginalResultBeforeChangedRevisionAndTargetValidation() = runTest {
         val d = StandardTestDispatcher(testScheduler)
-        val c = BackendComposition.open(temporary.root.toPath().resolve("dedup.db"), temporary.root.toPath().resolve("objects"), d, d)
+        val c = BackendComposition.open(temporary.root.toPath().resolve("dedup.db"), temporary.root.toPath().resolve("objects"), SimulatorBackendInputSourceFactory, d, d)
         try {
             val first = c.application.start(device, "start", 1.75, 1)
             c.application.stop(device, "stop")
@@ -107,7 +107,7 @@ class ReviewRegressionTest {
 
     @Test fun latestReadStraddlingStopAndApplyRetainsTheSamplesOriginalRevision() = runTest {
         val d = StandardTestDispatcher(testScheduler)
-        val c = BackendComposition.open(temporary.root.toPath().resolve("latest.db"), temporary.root.toPath().resolve("objects"), d, d)
+        val c = BackendComposition.open(temporary.root.toPath().resolve("latest.db"), temporary.root.toPath().resolve("objects"), SimulatorBackendInputSourceFactory, d, d)
         val reader = Executors.newSingleThreadExecutor { Thread(it, "latest-reader") }.asCoroutineDispatcher()
         val captured = CountDownLatch(1); val release = CountDownLatch(1)
         val stateField = field(c.runtime, "state")
@@ -142,7 +142,7 @@ class ReviewRegressionTest {
 
     private fun ambiguousAcknowledgement(alarmFailure: Boolean) = runTest {
         val d = StandardTestDispatcher(testScheduler)
-        val c = BackendComposition.open(temporary.root.toPath().resolve("ack.db"), temporary.root.toPath().resolve("objects"), d, d)
+        val c = BackendComposition.open(temporary.root.toPath().resolve("ack.db"), temporary.root.toPath().resolve("objects"), SimulatorBackendInputSourceFactory, d, d)
         val persistenceField = field(c.runtime, "persistence")
         val delegate = persistenceField.get(c.runtime) as RuntimePersistence
         var failed = false

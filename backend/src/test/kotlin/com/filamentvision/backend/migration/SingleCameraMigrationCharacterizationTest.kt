@@ -1,5 +1,6 @@
 package com.filamentvision.backend.migration
 
+import com.filamentvision.backend.migration.fixtures.*
 import com.filamentvision.backend.adapter.DecodedImage
 import com.filamentvision.backend.api.dto.toDto
 import com.filamentvision.backend.input.decoder.*

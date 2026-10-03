@@ -1,15 +1,16 @@
 package com.filamentvision.backend.e2e
 
 import com.filamentvision.backend.BackendComposition
-import com.filamentvision.backend.input.inspector.RawParseStatus
+import com.filamentvision.backend.application.PageQuery
 import com.filamentvision.backend.input.profile.*
-import com.filamentvision.backend.input.runtime.UdpCameraInputSource
+import com.filamentvision.backend.input.runtime.*
+import com.filamentvision.backend.input.transport.StructuredTransportCodec
+import com.filamentvision.backend.input.transport.StructuredTransportHeader
 import com.filamentvision.core.event.DomainEvent
 import com.filamentvision.core.event.EventReplay
 import java.net.DatagramSocket
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -18,185 +19,134 @@ import org.junit.rules.TemporaryFolder
 class UdpInputEndToEndTest {
     @get:Rule val temporary = TemporaryFolder()
 
-    @Test fun structuredGrayAcceptsOutOfOrderChunksForIndependentCamerasAndFeedsInspector() = runBlocking {
-        val (portA, portB) = freePorts()
-        val framing = ApplicationFramingProfile(
-            headerEnabled = true,
-            headerFormat = FramingFormat.ASCII,
-            headerBytes = "FV",
-            headerScope = FramingScope.FRAME,
-            stripHeader = true,
-        )
-        val profiles = structuredProfiles(portA, portB, framing)
+    @Test fun outOfOrderPiImagesProduceOneNeutralPreviewAndReliableDurableEvents() = runBlocking {
+        val port = freePort()
         val c = open("structured")
+        val source = c.inputSource as RaspberryPiUdpInputSource
         try {
-            apply(c, profiles, "structured")
-            val lease = c.application.createPacketInspectorLease(c.deviceId, "A", 128)
-            c.application.start(c.deviceId, "start-structured", null, null)
-            val image = grayImage()
+            apply(c, profile(port))
+            val session = c.application.start(c.deviceId, "start", null, null).session!!.id
+            val previewBlocked = CompletableDeferred<Unit>()
+            val slowPreview = launch { c.previews.frames(c.previewKeys).collect {
+                previewBlocked.complete(Unit); awaitCancellation()
+            } }
             UdpTestSender().use { sender ->
-                sender.sendStructured(portA, UdpCameraId.A, 1u, "NO".encodeToByteArray() + image, 97)
-                await { c.application.udpDiagnostics(c.deviceId, "A").framesDropped >= 1 }
-                assertEquals(1, c.application.udpDiagnostics(c.deviceId, "A").invalidHeaderCount)
-
-                val valid = "FV".encodeToByteArray() + image
-                val chunkCount = (valid.size + 96) / 97
-                val reverse = (0 until chunkCount).reversed().toList()
-                sender.sendStructured(portA, UdpCameraId.A, 2u, valid, 97, reverse)
-                sender.sendStructured(portB, UdpCameraId.B, 2u, valid, 97, reverse)
-                await { c.application.latest(c.deviceId) != null }
+                send(sender, port, 1, header = byteArrayOf(0, 1))
+                await { source.udpDiagnostics().invalidHeaderCount == 4L }
+                send(sender, port, 2)
+                await { c.runtime.state.value.statistics.sampleCount == 1L }
+                withTimeout(3000) { previewBlocked.await() }
+                assertEquals(1.75, c.application.latest(c.deviceId)!!.measurement.diameterMm, 1e-9)
+                delay(140)
+                send(sender, port, 3, width = 37)
+                await { c.runtime.state.value.statistics.sampleCount == 2L }
+                delay(140)
+                send(sender, port, 4, width = 37)
+                await { c.runtime.state.value.statistics.sampleCount == 3L }
             }
-
-            val source = c.inputSource as UdpCameraInputSource
-            val a = c.application.udpDiagnostics(c.deviceId, "A")
-            val b = c.application.udpDiagnostics(c.deviceId, "B")
-            assertTrue(a.outOfOrderChunks!! > 0)
-            assertTrue(b.outOfOrderChunks!! > 0)
+            assertTrue(source.udpDiagnostics().outOfOrderChunks!! > 0)
             assertEquals(1, source.activeProducerCount)
-            assertEquals(1, source.maximumActiveProducerCount)
-            val snapshot = c.application.packetInspectorSnapshot(c.deviceId, "A", lease.id, 128)
-            assertNotNull(snapshot.raw.transport)
-            assertNotNull(snapshot.parsedFrame)
-            assertEquals("GRAY8", snapshot.parsedFrame!!.payloadFormat)
-            c.application.stop(c.deviceId, "stop-structured")
-            assertEquals(0, source.activeProducerCount)
-        } finally { c.close() }
-        Unit
-    }
-
-    @Test fun parserOnlyApplyAndPortRestartTakeEffectWithoutDuplicatingProducer() = runBlocking {
-        val (portA, portB) = freePorts()
-        val oldFraming = frameHeader("A")
-        val c = open("apply")
-        try {
-            apply(c, structuredProfiles(portA, portB, oldFraming), "initial")
-            c.application.start(c.deviceId, "start-apply", null, null)
-            UdpTestSender().use { sender ->
-                val image = grayImage()
-                sender.sendStructured(portA, UdpCameraId.A, 10u, byteArrayOf('A'.code.toByte()) + image, 128)
-                await { c.application.udpDiagnostics(c.deviceId, "A").framesCompleted == 1L }
-
-                val parserRevision = c.application.saveUdpInput(
-                    c.deviceId,
-                    "save-parser",
-                    structuredProfiles(portA, portB, frameHeader("B")),
-                ).savedRevision
-                c.application.applyUdpInput(c.deviceId, "apply-parser", parserRevision, parserRevision)
-                sender.sendStructured(portA, UdpCameraId.A, 11u, byteArrayOf('B'.code.toByte()) + image, 128)
-                await { c.application.udpDiagnostics(c.deviceId, "A").framesCompleted == 2L }
-
-                val newPort = freePorts().first
-                val restarted = structuredProfiles(newPort, portB, frameHeader("B"))
-                val restartRevision = c.application.saveUdpInput(c.deviceId, "save-restart", restarted).savedRevision
-                c.application.applyUdpInput(c.deviceId, "apply-restart", restartRevision, restartRevision)
-                sender.sendStructured(newPort, UdpCameraId.A, 12u, byteArrayOf('B'.code.toByte()) + image, 128)
-                await { c.application.udpDiagnostics(c.deviceId, "A").framesCompleted == 3L }
-                assertEquals(0, c.application.udpDiagnostics(c.deviceId, "B").datagramsReceived)
-            }
-            val source = c.inputSource as UdpCameraInputSource
-            assertEquals(1, source.activeProducerCount)
-            assertEquals(1, source.maximumActiveProducerCount)
-            assertEquals(c.udpInputRouter.effectiveProfiles, c.udpInputRouter.receiverEffectiveProfiles)
-            assertEquals(c.udpInputRouter.appliedRevision, c.application.udpInputConfiguration(c.deviceId).appliedRevision)
-            c.application.stop(c.deviceId, "stop-apply")
-        } finally { c.close() }
-        Unit
-    }
-
-    @Test fun singleDiameterSourceFilterAndSentinelDropsAreObservableWithoutEnteringPipeline() = runBlocking {
-        val (portA, portB) = freePorts()
-        val limits = TransportLimits(maxFrameBytes = 32, maxChunkPayloadBytes = 32)
-        fun diameter(id: UdpCameraId, port: Int, sourceIp: String?) = UdpInputProfile(
-            id, true, sourceIp, port, TransportMode.SINGLE_DATAGRAM,
-            PayloadProfile.Diameter(DiameterValueEncoding.ASCII, DiameterByteOrder.BIG_ENDIAN),
-            ApplicationFramingProfile(), limits,
-        )
-        val profiles = UdpInputProfileSet(diameter(UdpCameraId.A, portA, null), diameter(UdpCameraId.B, portB, "127.0.0.2"))
-        val c = open("single")
-        try {
-            apply(c, profiles, "single")
-            val lease = c.application.createPacketInspectorLease(c.deviceId, "A", 64)
-            val mismatchLease = c.application.createPacketInspectorLease(c.deviceId, "B", 64)
-            c.application.start(c.deviceId, "start-single", null, null)
-            UdpTestSender().use { sender ->
-                sender.send(portA, "1.75".encodeToByteArray())
-                await { c.application.latest(c.deviceId) != null }
-                val parsed = c.application.packetInspectorSnapshot(c.deviceId, "A", lease.id, 64)
-                assertEquals("DIAMETER", parsed.parsedFrame!!.payloadFormat)
-
-                repeat(12) { sender.send(portA, "2.00".encodeToByteArray()) }
-                await { c.runtime.state.value.statistics.sampleCount >= 2 }
-
-                sender.send(portB, "1.80".encodeToByteArray())
-                await { c.application.udpDiagnostics(c.deviceId, "B").sourceFilteredDatagrams == 1L }
-                assertEquals(
-                    RawParseStatus.SOURCE_IP_MISMATCH,
-                    c.application.packetInspectorSnapshot(c.deviceId, "B", mismatchLease.id, 64).raw.status,
-                )
-
-                sender.send(portA, ByteArray(33) { 1 })
-                await { c.application.udpDiagnostics(c.deviceId, "A").oversizedOrTruncatedDatagrams == 1L }
-                assertEquals(
-                    RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED,
-                    c.application.packetInspectorSnapshot(c.deviceId, "A", lease.id, 64).raw.status,
-                )
-            }
-            c.application.stop(c.deviceId, "stop-single")
+            assertEquals(1, source.activeReceiverCount)
+            assertEquals(1L, source.totalProducerStarts)
+            assertEquals(1, c.previews.metrics.retainedFrames)
+            assertTrue(c.previews.metrics.pendingFrames <= 1)
+            assertTrue(c.previews.metrics.droppedFrames > 0)
+            val preview = c.previews.latest(c.previewKeys.single())!!
+            assertEquals("camera", preview.key.cameraId.value)
+            assertTrue(preview.payloadSize <= 1280 * 720 * 4)
+            c.application.stop(c.deviceId, "stop")
+            val history = c.application.history(session, PageQuery()).items
+            assertEquals(3, history.size)
+            assertTrue(history.all { it.measurement.evidence.single().cameraId.value == "camera" })
+            assertTrue(history.all { it.measurement.legacyFusion == null })
+            assertEquals(1.85, history.last().measurement.diameterMm, 1e-9)
+            assertTrue(c.application.alarms(session).isNotEmpty())
             val replay = c.events.replayAfter(c.deviceId, 0) as EventReplay.Available
-            assertTrue(replay.events.any { it.event is DomainEvent.SessionStarted })
-            assertTrue(replay.events.any { it.event is DomainEvent.Measurement })
-            assertTrue(replay.events.any { it.event is DomainEvent.Alarm })
-            assertTrue(replay.events.any { it.event is DomainEvent.SessionFinalized })
-            assertTrue(c.packetInspector.retainedPreviewBytes <= 128)
+            assertEquals((1L..replay.latestSequence).toList(), replay.events.map { it.sequence })
+            val finalAt = replay.events.indexOfFirst { it.event is DomainEvent.SessionFinalized }
+            assertTrue(finalAt > replay.events.indexOfLast { it.event is DomainEvent.Measurement })
+            assertTrue(finalAt > replay.events.indexOfLast { it.event is DomainEvent.Alarm })
+            slowPreview.cancelAndJoin()
+            assertEquals(0 to 0, c.runtime.queuedCounts())
         } finally { c.close() }
-        Unit
+        assertEquals(0, source.activeProducerCount)
+        assertEquals(0, source.activeReceiverCount)
+        assertEquals(0, source.pendingInputCount)
+        assertEquals(0, c.previews.metrics.retainedFrames)
+        DatagramSocket(port).close()
     }
 
-    private suspend fun apply(c: BackendComposition, profiles: UdpInputProfileSet, key: String) {
-        val saved = c.application.saveUdpInput(c.deviceId, "save-$key", profiles)
-        c.application.applyUdpInput(c.deviceId, "apply-$key", saved.savedRevision, saved.savedRevision)
+    @Test fun parserApplyAndPortRestartUseOneRuntimeOwnedSource() = runBlocking {
+        val c = open("apply")
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        val port = freePort()
+        try {
+            apply(c, profile(port))
+            c.application.start(c.deviceId, "start", null, null)
+            UdpTestSender().use { sender ->
+                send(sender, port, 10)
+                await { c.runtime.state.value.statistics.sampleCount == 1L }
+                val changed = profile(port).copy(envelope = DatagramEnvelopeProfile("BB 02", "0D 0A"))
+                apply(c, changed)
+                send(sender, port, 11)
+                await { source.udpDiagnostics().invalidHeaderCount == 4L }
+                send(sender, port, 12, header = byteArrayOf(0xbb.toByte(), 2))
+                await { c.runtime.state.value.statistics.sampleCount == 2L }
+                val next = changed.copy(listenPort = freePort())
+                apply(c, next)
+                DatagramSocket(port).close()
+                send(sender, next.listenPort, 13, header = byteArrayOf(0xbb.toByte(), 2))
+                await { c.runtime.state.value.statistics.sampleCount == 3L }
+                assertEquals(next, source.effectiveProfile)
+                assertEquals(next, c.udpProfileRepository.state().applied.profile)
+                assertEquals(c.udpProfileRepository.state().applied.revision, checkNotNull(c.udpInputRouter).appliedRevision)
+            }
+            assertEquals(1, source.activeReceiverCount)
+            assertEquals(1L, source.totalProducerStarts)
+        } finally { c.close() }
     }
 
+    @Test fun sourceFilterAndSentinelDropsNeverEnterVision() = runBlocking {
+        val c = open("guards")
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        val port = freePort()
+        try {
+            apply(c, profile(port).copy(raspberryPiIpv4 = "127.0.0.2"))
+            c.application.start(c.deviceId, "start", null, null)
+            UdpTestSender().use { sender ->
+                sender.send(port, byteArrayOf(1))
+                await { source.udpDiagnostics().sourceFilteredDatagrams == 1L }
+                apply(c, profile(port))
+                sender.send(port, ByteArray(38 + 128 + 1))
+                await { source.udpDiagnostics().oversizedOrTruncatedDatagrams == 1L }
+            }
+            assertEquals(0L, source.udpDiagnostics().framesCompleted)
+            assertNull(c.application.latest(c.deviceId))
+            assertEquals(0L, c.previews.metrics.publishedFrames)
+        } finally { c.close() }
+    }
+
+    private suspend fun apply(c: BackendComposition, profile: RaspberryPiUdpInputProfile) {
+        val service = checkNotNull(c.udpInputService)
+        val saved = service.save(c.udpProfileRepository.state().saved.revision, profile)
+        assertEquals(RaspberryPiUdpApplyOutcome.APPLIED, service.apply(saved.revision).outcome)
+    }
     private suspend fun open(name: String) = BackendComposition.open(
-        temporary.root.toPath().resolve("$name.db"),
-        temporary.root.toPath().resolve("$name-objects"),
-    )
-
-    private fun structuredProfiles(portA: Int, portB: Int, framing: ApplicationFramingProfile) = UdpInputProfileSet(
-        structured(UdpCameraId.A, portA, framing),
-        structured(UdpCameraId.B, portB, framing),
-    )
-
-    private fun structured(id: UdpCameraId, port: Int, framing: ApplicationFramingProfile) = UdpInputProfile(
-        id, true, null, port, TransportMode.STRUCTURED_CHUNKED,
-        PayloadProfile.Gray8(48, 8), framing,
-        TransportLimits(maxInFlightFrames = 2, maxFrameBytes = 1_024, frameTimeoutMs = 500,
-            maxChunkCount = 16, maxChunkPayloadBytes = 128),
-    )
-
-    private fun frameHeader(value: String) = ApplicationFramingProfile(
-        headerEnabled = true,
-        headerFormat = FramingFormat.ASCII,
-        headerBytes = value,
-        headerScope = FramingScope.FRAME,
-        stripHeader = true,
-    )
-
-    private fun grayImage(): ByteArray {
-        val width = 35
+        temporary.root.toPath().resolve("$name.db"), temporary.root.toPath().resolve("$name-objects"))
+    private fun profile(port: Int) = RaspberryPiUdpInputProfile.defaults().copy(
+        enabled = true, listenPort = port, payload = ImagePayloadProfile.Gray8(48, 8),
+        transportLimits = TransportLimits(2, 1024, 500, 16, 128))
+    private fun send(sender: UdpTestSender, port: Int, id: Long, width: Int = 35, header: ByteArray = byteArrayOf(0xaa.toByte(), 1)) {
         val left = (48 - width) / 2
-        return ByteArray(48 * 8) { index ->
-            if (index % 48 in left until left + width) 20 else 200.toByte()
+        val pixels = ByteArray(48 * 8) { if (it % 48 in left until left + width) 20 else 200.toByte() }
+        val chunks = pixels.asList().chunked(97).map { it.toByteArray() }
+        for (i in chunks.indices.reversed()) {
+            val chunk = chunks[i]
+            sender.send(port, header + StructuredTransportCodec.encode(
+                StructuredTransportHeader(UdpCameraId.A, id.toULong(), i, chunks.size, id * 1000, chunk.size, pixels.size.toLong()),
+                chunk) + byteArrayOf(13, 10))
         }
     }
-
-    private suspend fun await(condition: suspend () -> Boolean) = withTimeout(5_000) {
-        while (!condition()) delay(10)
-    }
-
-    private fun freePorts(): Pair<Int, Int> {
-        val a = DatagramSocket(0)
-        val b = DatagramSocket(0)
-        return try { a.localPort to b.localPort } finally { a.close(); b.close() }
-    }
+    private suspend fun await(condition: suspend () -> Boolean) = withTimeout(5000) { while (!condition()) delay(5) }
+    private fun freePort() = DatagramSocket(0).use { it.localPort }
 }

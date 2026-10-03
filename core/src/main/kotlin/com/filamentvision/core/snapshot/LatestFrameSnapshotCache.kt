@@ -37,4 +37,5 @@ class LatestFrameSnapshotCache(private val maxEntries: Int, private val maxBytes
     }
     @Synchronized fun get(key: PreviewKey): EncodedSnapshot? = entries[key]
     @Synchronized fun state(): SnapshotCacheState = SnapshotCacheState(entries.size, bytes)
+    @Synchronized fun clear() { entries.clear(); bytes = 0L }
 }

@@ -1,5 +1,6 @@
 package com.filamentvision.backend.persistence.sqlite
 
+import com.filamentvision.backend.migration.fixtures.*
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.config.*
 import com.filamentvision.core.runtime.*

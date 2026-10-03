@@ -1,6 +1,5 @@
 package com.filamentvision.backend
 
-import com.filamentvision.backend.simulator.SimulationScenario
 import com.filamentvision.backend.api.*
 import com.filamentvision.backend.preview.PngPreviewEncoder
 import io.ktor.server.application.Application
@@ -9,12 +8,12 @@ import io.ktor.server.netty.Netty
 import kotlinx.coroutines.*
 import java.nio.file.Path
 
-data class BackendOptions(val database: Path, val snapshotRoot: Path, val host: String, val port: Int, val scenario: SimulationScenario)
+data class BackendOptions(val database: Path, val snapshotRoot: Path, val host: String, val port: Int)
 fun parseBackendOptions(args: Array<String>): BackendOptions {
-    require(args.size % 2 == 0 && args.size <= 12)
+    require(args.size % 2 == 0 && args.size <= 8)
     val values = linkedMapOf<String, String>()
     args.toList().chunked(2).forEach { (key, value) ->
-        require(key in setOf("--database", "--snapshot-root", "--host", "--port", "--scenario"))
+        require(key in setOf("--database", "--snapshot-root", "--host", "--port"))
         require(value.isNotBlank() && value.length <= 4096 && key !in values)
         values[key] = value
     }
@@ -23,8 +22,7 @@ fun parseBackendOptions(args: Array<String>): BackendOptions {
     val host = values["--host"] ?: "127.0.0.1"
     require(host.length <= 253 && host.matches(Regex("[A-Za-z0-9.:-]+")))
     return BackendOptions(Path.of(values["--database"] ?: "build/phase2.db").toAbsolutePath().normalize(),
-        Path.of(values["--snapshot-root"] ?: "build/snapshots").toAbsolutePath().normalize(), host, port,
-        values["--scenario"]?.let(SimulationScenario::valueOf) ?: SimulationScenario.NORMAL)
+        Path.of(values["--snapshot-root"] ?: "build/snapshots").toAbsolutePath().normalize(), host, port)
 }
 fun Application.installBackend(composition: BackendComposition) {
     installRestApi(composition.application)
