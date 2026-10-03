@@ -64,11 +64,26 @@ class UdpReceiver(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     envelopeBytes: Int = 0,
     private val bindIpv4: String = "0.0.0.0",
+    maximumReceiveCapacity: UdpReceiveCapacity? = null,
     private val consumer: UdpDatagramConsumer,
 ) {
     private val lifecycle = Mutex()
     private val sourceFilter = Ipv4SourceFilter(profile.sourceIp)
-    val receiveCapacity: UdpReceiveCapacity = UdpReceiveCapacityCalculator.forProfile(profile, envelopeBytes)
+    @Volatile var receiveCapacity: UdpReceiveCapacity = UdpReceiveCapacityCalculator.forProfile(profile, envelopeBytes)
+        private set
+    private val physicalCapacity = maximumReceiveCapacity ?: receiveCapacity
+
+    init {
+        require(physicalCapacity == UdpReceiveCapacityCalculator.calculate(physicalCapacity.acceptedLimit.toLong()))
+        require(receiveCapacity.acceptedLimit <= physicalCapacity.acceptedLimit)
+    }
+
+    /** Changes the logical sentinel guard without replacing the single receive buffer or job. */
+    internal fun updateReceiveCapacity(capacity: UdpReceiveCapacity) {
+        require(capacity == UdpReceiveCapacityCalculator.calculate(capacity.acceptedLimit.toLong()))
+        require(capacity.acceptedLimit <= physicalCapacity.acceptedLimit)
+        receiveCapacity = capacity
+    }
 
     @Volatile
     var state: UdpReceiverState = UdpReceiverState.IDLE
@@ -97,7 +112,7 @@ class UdpReceiver(
                     opening = socket
                     socket.setOption(
                         StandardSocketOptions.SO_RCVBUF,
-                        max(MIN_SOCKET_RECEIVE_QUEUE_BYTES, receiveCapacity.receiveCapacity),
+                        max(MIN_SOCKET_RECEIVE_QUEUE_BYTES, physicalCapacity.receiveCapacity),
                     )
                     socket.bind(InetSocketAddress(InetAddress.getByName(bindIpv4), profile.listenPort))
                     check((socket.localAddress as InetSocketAddress).address is Inet4Address)
@@ -127,7 +142,7 @@ class UdpReceiver(
     }
 
     private suspend fun receiveLoop(socket: DatagramChannel) {
-        val receiveArray = ByteArray(receiveCapacity.receiveCapacity)
+        val receiveArray = ByteArray(physicalCapacity.receiveCapacity)
         val receiveBuffer = ByteBuffer.wrap(receiveArray)
         try {
             while (currentCoroutineContext().isActive) {
@@ -144,7 +159,8 @@ class UdpReceiver(
                     observer.onReceived(datagram)
                     if (!sourceFilter.accepts(source)) {
                         observer.onSourceFiltered(datagram)
-                    } else if (receiveCapacity.sentinelEnabled && receivedSize == receiveCapacity.receiveCapacity) {
+                    } else if (receivedSize > receiveCapacity.acceptedLimit ||
+                        (physicalCapacity.sentinelEnabled && receivedSize == physicalCapacity.receiveCapacity)) {
                         observer.onDropped(UdpReceiverDropReason.DATAGRAM_TOO_LARGE_OR_TRUNCATED, datagram)
                     } else {
                         consumer.accept(datagram)

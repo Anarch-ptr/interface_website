@@ -19,7 +19,7 @@ import java.nio.channels.DatagramChannel
 
 /** One Runtime-owned source reservation, one socket job and one serialized processing chain. */
 class RaspberryPiUdpInputSource(
-    private val profile: RaspberryPiUdpInputProfile,
+    profile: RaspberryPiUdpInputProfile,
     private val ipv4Resolver: BackendIpv4Resolver = BackendIpv4Resolver(),
     private val channelFactory: UdpChannelFactory = UdpChannelFactory { DatagramChannel.open(StandardProtocolFamily.INET) },
     private val monotonicClock: MonotonicClock = MonotonicClock(System::nanoTime),
@@ -31,11 +31,13 @@ class RaspberryPiUdpInputSource(
     init { require(RaspberryPiUdpInputProfileValidator().validate(profile).isValid) { "Invalid Raspberry Pi UDP input profile" } }
 
     private val lifecycle = Mutex()
-    private val processingLock = Any()
+    private val processingLock = Mutex()
     private val mailboxLock = Any()
     // Caller-owned frames may outlive a processor or receiver lifecycle.
     private val decodedPermit = DecodedFramePermit()
-    private val activity = UdpActivity()
+    @Volatile private var profile = profile
+    @Volatile private var activity = UdpActivity()
+    @Volatile private var consistencyFailure: RaspberryPiUdpConsistencyException? = null
     private val udp = UdpDiagnostics(TransportMode.STRUCTURED_CHUNKED)
     private val ready = Channel<Unit>(Channel.CONFLATED)
     private var pending: CameraInput.Image? = null
@@ -72,12 +74,15 @@ class RaspberryPiUdpInputSource(
     }
 
     val activeReceiverCount: Int get() = receiver?.activeReceiverCount ?: 0
+    val effectiveProfile: RaspberryPiUdpInputProfile get() = profile
+    val receiverCapacity: UdpReceiveCapacity? get() = receiver?.receiveCapacity
     val pendingInputCount: Int get() = synchronized(mailboxLock) { if (pending == null) 0 else 1 }
     val preAdmissionDroppedInputs: Long get() = udp.snapshot().preAdmissionDroppedInputs
     fun udpDiagnostics() = udp.snapshot()
     fun operationalStatus() = activity.snapshot(monotonicClock.nowNanos())
 
     override suspend fun start() = lifecycle.withLock {
+        checkConsistency()
         if (activeProducerCount == 1) return@withLock
         mutableState.value = ImageInputState.STARTING
         mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = null)
@@ -85,31 +90,24 @@ class RaspberryPiUdpInputSource(
         activeProducerCount = 1 // Runtime's source lifecycle reservation; jobs never increment it.
         try {
             if (profile.enabled) {
-                synchronized(processingLock) {
+                processingLock.withLock {
                     processor = RaspberryPiUdpProcessor(compiledFactory(profile, reassemblyObserver()), decodedPermit)
                 }
                 synchronized(mailboxLock) { admitting = true }
                 // Refresh the selected address immediately before constructing/opening the receiver.
-                val bindIpv4 = when (val selected = profile.networkInterface) {
-                    NetworkInterfaceSelection.Auto -> "0.0.0.0"
-                    is NetworkInterfaceSelection.Specific -> {
-                        val resolved = ipv4Resolver.resolve(selected, profile.raspberryPiIpv4)
-                        if (resolved.selectedInterface == null) {
-                            activity.failed("SELECTED_IPV4_INTERFACE_UNAVAILABLE")
-                            error("SELECTED_IPV4_INTERFACE_UNAVAILABLE")
-                        }
-                        resolved.selectedInterface.ipv4
-                    }
+                val bindIpv4 = try { resolveBind(profile) } catch (error: Throwable) {
+                    activity.failed("SELECTED_IPV4_INTERFACE_UNAVAILABLE")
+                    throw error
                 }
                 val next = createReceiver(bindIpv4)
                 receiver = next
                 next.start()
                 activity.bound(monotonicClock.nowNanos())
-                expiryJob = CoroutineScope(dispatcher).launch {
-                    while (isActive) {
-                        delay(100)
-                        synchronized(processingLock) { processor?.expire(monotonicClock.nowNanos()) }
-                    }
+            }
+            expiryJob = CoroutineScope(dispatcher).launch {
+                while (isActive) {
+                    delay(100)
+                    processingLock.withLock { processor?.expire(monotonicClock.nowNanos()) }
                 }
             }
             totalProducerStarts++
@@ -143,7 +141,7 @@ class RaspberryPiUdpInputSource(
         receiver = null
         expiryJob?.cancelAndJoin()
         expiryJob = null
-        synchronized(processingLock) { processor = null }
+        processingLock.withLock { processor = null }
         synchronized(mailboxLock) {
             pending?.frame?.close(); pending = null
             ready.tryReceive()
@@ -162,6 +160,98 @@ class RaspberryPiUdpInputSource(
         ready.trySend(Unit)
         Unit
     }
+
+    internal fun checkConsistency() { consistencyFailure?.let { throw it } }
+
+    /** The lifecycle and processing locks span the repository decision and any compensation.
+     * Receive jobs can wait here, but no provisional frame is decoded/admitted before commit.
+     * The mailbox and shared decoded permit are never replaced or cleared by Apply.
+     */
+    internal suspend fun reconfigure(candidate: RaspberryPiUdpInputProfile, persist: suspend () -> Boolean): Boolean = lifecycle.withLock {
+        checkConsistency()
+        val compiled = compiledFactory(candidate, reassemblyObserver())
+        val next = compiled.profile
+        val bindIpv4 = resolveBind(next)
+        val preparedProcessor = RaspberryPiUdpProcessor(compiled, decodedPermit)
+        currentCoroutineContext().ensureActive()
+        withContext(NonCancellable) {
+            processingLock.withLock {
+                val oldProfile = profile
+                val oldProcessor = processor
+                val oldReceiver = receiver
+                val oldCapacity = oldReceiver?.receiveCapacity
+                val oldReceiverRunning = oldReceiver?.isRunning == true
+                val oldActivity = activity
+                val oldState = mutableState.value
+                val oldDiagnostics = mutableDiagnostics.value
+                val oldAdmitting = synchronized(mailboxLock) { admitting }
+                val active = activeProducerCount == 1
+                val restart = oldProfile.enabled != next.enabled || oldProfile.networkInterface != next.networkInterface ||
+                    oldProfile.listenPort != next.listenPort || oldProfile.raspberryPiIpv4 != next.raspberryPiIpv4
+                var committed = false
+                var failure: Throwable? = null
+                try {
+                    if (restart) oldReceiver?.stop() // Close and join before constructing the replacement.
+                    profile = next
+                    processor = if (active && next.enabled) preparedProcessor else null
+                    if (restart) {
+                        receiver = null
+                        activity = UdpActivity().also { it.reset(active && next.enabled) }
+                        if (active) {
+                            mutableState.value = ImageInputState.STARTING
+                            mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = null)
+                        }
+                        if (active && next.enabled) {
+                            receiver = createReceiver(bindIpv4)
+                            receiver!!.start()
+                            activity.bound(monotonicClock.nowNanos())
+                        }
+                        if (active) mutableState.compareAndSet(ImageInputState.STARTING, ImageInputState.RUNNING)
+                        synchronized(mailboxLock) { admitting = active && next.enabled }
+                    } else {
+                        receiver?.updateReceiveCapacity(receiveCapacity(next))
+                    }
+                    committed = persist()
+                } catch (error: Throwable) {
+                    failure = error
+                }
+                if (committed) return@withLock true
+                try {
+                    if (restart) receiver?.stop()
+                    profile = oldProfile
+                    processor = oldProcessor
+                    receiver = oldReceiver
+                    if (oldCapacity != null) oldReceiver.updateReceiveCapacity(oldCapacity)
+                    activity = oldActivity
+                    if (restart && oldReceiverRunning) oldReceiver!!.start()
+                    mutableState.value = oldState
+                    mutableDiagnostics.value = oldDiagnostics
+                    synchronized(mailboxLock) { admitting = oldAdmitting }
+                } catch (compensation: Throwable) {
+                    val fatal = RaspberryPiUdpConsistencyException(failure ?: IllegalStateException("UDP_APPLY_CAS_CONFLICT"), compensation)
+                    consistencyFailure = fatal
+                    try { receiver?.stop() } catch (cleanup: Throwable) { fatal.addSuppressed(cleanup) }
+                    receiver = null
+                    activity.reset(false)
+                    mutableState.value = ImageInputState.ERROR
+                    mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = "UDP_APPLY_CONSISTENCY_FAILURE")
+                    synchronized(mailboxLock) { admitting = false }
+                    throw fatal
+                }
+                failure?.let { throw it }
+                false
+            }
+        }
+    }
+
+    private fun resolveBind(candidate: RaspberryPiUdpInputProfile): String = when (val selected = candidate.networkInterface) {
+        NetworkInterfaceSelection.Auto -> "0.0.0.0"
+        is NetworkInterfaceSelection.Specific -> ipv4Resolver.resolve(selected, candidate.raspberryPiIpv4).selectedInterface?.ipv4
+            ?: error("SELECTED_IPV4_INTERFACE_UNAVAILABLE")
+    }
+
+    private fun receiveCapacity(candidate: RaspberryPiUdpInputProfile): UdpReceiveCapacity =
+        UdpReceiveCapacityCalculator.calculate(38L + candidate.transportLimits.maxChunkPayloadBytes)
 
     private fun createReceiver(bindIpv4: String): UdpReceiver {
         // Legacy receiver configuration is an internal adapter only; the public profile stays single-stream.
@@ -182,9 +272,15 @@ class RaspberryPiUdpInputSource(
                 mutableState.value = ImageInputState.ERROR
             }
         }, channelFactory = channelFactory, monotonicClock = monotonicClock, epochClock = epochClock,
-            dispatcher = dispatcher, envelopeBytes = 4, bindIpv4 = bindIpv4) { datagram ->
+            dispatcher = dispatcher, envelopeBytes = 4, bindIpv4 = bindIpv4,
+            maximumReceiveCapacity = UdpReceiveCapacityCalculator.calculate(38L + 60_000)) { datagram ->
             activity.accepted(datagram.receivedAtMonotonicNanos)
-            synchronized(processingLock) {
+            processingLock.withLock {
+                // A datagram may have passed the receiver guard immediately before a limit swap.
+                if (datagram.size > receiveCapacity(profile).acceptedLimit) {
+                    udp.datagramTooLargeOrTruncated()
+                    return@withLock
+                }
                 when (val result = checkNotNull(processor).process(datagram.bytes, datagram.metadata())) {
                     is ProcessorResult.Accepted -> { udp.frameCompleted(result.completedAtMonotonicNanos); offerInput(result.input) }
                     is ProcessorResult.Rejected -> udp.rejected(result.stage, result.reason)
