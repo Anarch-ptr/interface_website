@@ -22,6 +22,9 @@ export class BackendFilamentDataSource implements FilamentDataSource {
   private generation = 0
   private cursor: number | null = null
   private backendMonitoring = 'IDLE'
+  private authoritativeVersion = 0
+  private lastRunningVersion = 0
+  private lastStoppedVersion = 0
   private observerAbort: AbortController | null = null
   private eventSocket: WebSocket | null = null
   private eventRefreshAbort: AbortController | null = null
@@ -233,6 +236,11 @@ export class BackendFilamentDataSource implements FilamentDataSource {
   }
   private applyState(monitoring: string, authoritative = true) {
     const running = monitoring === 'RUNNING' || monitoring === 'STARTING'
+    if (authoritative) {
+      this.authoritativeVersion++
+      if (running) this.lastRunningVersion = this.authoritativeVersion
+      else this.lastStoppedVersion = this.authoritativeVersion
+    }
     if (authoritative && this.lastCommand?.done && (this.lastCommand.action === 'start') !== running) {
       this.lastCommand = null
     }
@@ -306,12 +314,17 @@ export class BackendFilamentDataSource implements FilamentDataSource {
     const abort = new AbortController(); this.commandAborts.add(abort)
     command.promise = this.commandTail.catch(() => {}).then(async () => {
       abort.signal.throwIfAborted()
+      const issuedVersion = this.authoritativeVersion
       const result = await this.read<unknown>(`${this.device()}/monitoring/${action}`, abort.signal, { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commandId: command.id, ...body }) })
       if (!record(result) || !(action === 'start' ? ['STARTED', 'ALREADY_RUNNING'].includes(String(result.outcome)) : result.outcome === 'STOPPED')) {
         throw new Error('Invalid Backend command result.')
       }
-      command.done = true
+      // A late ACK cannot reinstate a no-op cache invalidated by authoritative
+      // contrary state observed after this request began executing.
+      const contraryVersion = action === 'start' ? this.lastStoppedVersion : this.lastRunningVersion
+      command.done = contraryVersion <= issuedVersion
+      if (!command.done && this.lastCommand === command) this.lastCommand = null
     }).finally(() => { command.promise = null; this.commandAborts.delete(abort) })
     this.commandTail = command.promise
     return command.promise

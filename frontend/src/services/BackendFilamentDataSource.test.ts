@@ -466,4 +466,51 @@ describe('BackendFilamentDataSource', () => {
     expect(Socket.all.some(socket => socket.closed)).toBe(false)
     release(); await flush(); runtime.dispose()
   })
+
+  it.each([['start', 'RUNNING', 'COMPLETED'], ['stop', 'COMPLETED', 'RUNNING']] as const)(
+    'does not cache a delayed %s response after authoritative %s then %s', async (action, intermediate, contrary) => {
+      let completeCommand!: (response: Response) => void
+      let commandRequests = 0
+      vi.mocked(fetch).mockImplementation(async (url) => {
+        if (String(url).endsWith('/state')) return Response.json({ correlationId: 'test', data: state() })
+        commandRequests++
+        if (commandRequests === 1) return new Promise<Response>(resolve => { completeCommand = resolve })
+        return Response.json({ correlationId: 'test', data: { outcome: action === 'start' ? 'STARTED' : 'STOPPED', session: null } })
+      })
+      const source = new BackendFilamentDataSource()
+      const issue = () => action === 'start' ? source.start(configuration) : source.stop()
+      source.observe(configuration); await flush()
+      const pending = issue(); await flush()
+      expect(issue()).toBe(pending)
+      events().message(event(5, 'state.changed', { monitoring: intermediate,
+        session: intermediate === 'RUNNING' ? state().session : null, activeProducerCount: intermediate === 'RUNNING' ? 1 : 0 }))
+      events().message(event(6, 'state.changed', { monitoring: contrary,
+        session: contrary === 'RUNNING' ? state().session : null, activeProducerCount: contrary === 'RUNNING' ? 1 : 0 }))
+      expect(issue()).toBe(pending)
+      completeCommand(Response.json({ correlationId: 'test', data: { outcome: action === 'start' ? 'STARTED' : 'STOPPED', session: null } }))
+      await pending; await issue()
+      expect(commandRequests).toBe(2)
+      const requests = vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')
+      expect(JSON.parse(requests[0][1]!.body as string).commandId).not.toBe(JSON.parse(requests[1][1]!.body as string).commandId)
+      source.dispose()
+    },
+  )
+
+  it.each([['start', 'RUNNING'], ['stop', 'COMPLETED']] as const)(
+    'keeps the completed %s cache reusable when newer authoritative %s agrees', async (action, monitoring) => {
+      let completeCommand!: (response: Response) => void
+      vi.mocked(fetch).mockImplementation(async (url) => String(url).endsWith('/state') ?
+        Response.json({ correlationId: 'test', data: state() }) : new Promise<Response>(resolve => { completeCommand = resolve }))
+      const source = new BackendFilamentDataSource()
+      source.observe(configuration); await flush()
+      const issue = () => action === 'start' ? source.start(configuration) : source.stop()
+      const pending = issue(); await flush()
+      events().message(event(5, 'state.changed', { monitoring,
+        session: monitoring === 'RUNNING' ? state().session : null, activeProducerCount: monitoring === 'RUNNING' ? 1 : 0 }))
+      completeCommand(Response.json({ correlationId: 'test', data: { outcome: action === 'start' ? 'STARTED' : 'STOPPED', session: null } }))
+      await pending; await issue()
+      expect(vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1)
+      source.dispose()
+    },
+  )
 })
