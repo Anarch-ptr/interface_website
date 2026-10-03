@@ -50,10 +50,10 @@ class WebSocketOwnershipTest {
                 ws.webSocket("/api/v1/events") {
                     val eventTwo = this
                     assertEquals(1, nextJson()["payload"]["state"]["activeProducerCount"].asInt())
-                    ws.webSocket("/api/v1/previews?cameraId=A&stage=RAW") {
-                        assertImage(1, "A", "RAW")
-                        ws.webSocket("/api/v1/previews?cameraId=A&stage=RAW") {
-                            assertImage(1, "A", "RAW")
+                    ws.webSocket("/api/v1/previews?stage=RAW") {
+                        assertImage(1, "camera", "RAW")
+                        ws.webSocket("/api/v1/previews?stage=RAW") {
+                            assertImage(1, "camera", "RAW")
                             events.publish(error())
                             assertEquals(1L, eventOne.nextJson()["sequence"].asLong())
                             assertEquals(1L, eventTwo.nextJson()["sequence"].asLong())

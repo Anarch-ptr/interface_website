@@ -44,7 +44,7 @@ class RequestMediaContractTest {
             }
             assertEquals(if (path == "/calibration/drafts") HttpStatusCode.Created else HttpStatusCode.OK, response.status)
         }
-        assertEquals(listOf("start", "stop", "save", "apply", "saveAndApply", "createDraft", "updateDraft", "deleteDraft"), backend.calls.map { it.first })
+        assertEquals(listOf("start", "stop", "save", "apply", "saveAndApply", "createDraft", "updateDraft", "deleteDraft", "saveUdpInput", "applyUdpInput"), backend.calls.map { it.first })
         assertTrue(backend.calls.all { "命令-1" in it.second })
     }
 
@@ -57,5 +57,8 @@ class RequestMediaContractTest {
         Triple(HttpMethod.Post, "/calibration/drafts", ",\"cameraId\":\"A\",\"configuration\":{}"),
         Triple(HttpMethod.Patch, "/calibration/drafts/draft1", ",\"expectedRevision\":1,\"configuration\":{}"),
         Triple(HttpMethod.Delete, "/calibration/drafts/draft1", ""),
+        Triple(HttpMethod.Put, "/udp-input-configuration", ",\"expectedSavedRevision\":1,\"configuration\":" +
+            parse(udpSaveJson("body", 1))["configuration"].toString()),
+        Triple(HttpMethod.Post, "/udp-input-configuration/apply", ",\"revision\":1,\"expectedSavedRevision\":1"),
     )
 }

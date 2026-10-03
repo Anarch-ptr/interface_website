@@ -6,10 +6,7 @@ data class CalibrationDto(val roiLeft: Int = 0, val roiTop: Int = 0, val roiRigh
     val mmPerPixel: Double = 0.0, val minimumConfidence: Double = 0.7)
 data class GeometryDto(val rotationDegrees: Int = 0, val mirrorHorizontally: Boolean = false, val mirrorVertically: Boolean = false)
 data class VisionConfigurationDto(val calibration: CalibrationDto = CalibrationDto(), val geometry: GeometryDto = GeometryDto())
-data class FusionConfigurationDto(val cameraAWeight: Double = 0.5, val cameraBWeight: Double = 0.5,
-    val minimumConfidence: Double = 0.7, val maximumTimestampDifferenceMillis: Long = 100)
-data class ConfigurationDto(val cameraA: VisionConfigurationDto = VisionConfigurationDto(), val cameraB: VisionConfigurationDto = VisionConfigurationDto(),
-    val fusion: FusionConfigurationDto = FusionConfigurationDto(), val targetDiameter: Double = 1.75,
+data class ConfigurationDto(val vision: VisionConfigurationDto = VisionConfigurationDto(), val targetDiameter: Double = 1.75,
     val writeBatchSize: Int = 8, val flushIntervalMillis: Long = 1000, val realtimeCapacity: Int = 300,
     val previewFramesPerSecond: Int = 8, val publicationIntervalMillis: Long = 125)
 data class SaveConfigurationRequest(val commandId: String, val configuration: ConfigurationDto)

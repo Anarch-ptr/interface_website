@@ -25,17 +25,21 @@ class RestContractTest {
             val text = response.bodyAsText(); val root = parse(text)
             assertEquals("corr1", root["correlationId"].asText())
             val measurement = if (path == "state") root["data"]["latestMeasurement"] else root["data"]["measurement"]
-            assertTrue(measurement["cameraB"].isNull); assertTrue(measurement["diameterB"].isNull)
-            assertEquals("A", measurement["cameraA"]["cameraId"].asText())
-            assertEquals(1001, measurement["cameraA"]["timestamp"].asLong())
-            assertEquals(7, measurement["cameraA"]["sequence"].asLong())
-            assertEquals("VISION", measurement["cameraA"]["source"].asText())
-            assertEquals(0.95, measurement["cameraA"]["confidence"].asDouble(), 0.0)
-            assertTrue(measurement["cameraA"]["valid"].asBoolean())
-            assertEquals(1.8, measurement["fusedDiameter"].asDouble(), 0.0)
-            assertEquals(0.0, measurement["shapeDifference"].asDouble(), 0.0)
-            assertEquals("CAMERA_B_MISSING", measurement["fusionReason"].asText())
-            assertEquals("CAMERA_B_FAILURE", measurement["status"].asText())
+            assertEquals(setOf("evidence", "diameterMm", "confidence", "status", "timestamp"), measurement.fieldNames().asSequence().toSet())
+            assertEquals(1, measurement["evidence"].size())
+            val evidence = measurement["evidence"][0]
+            assertEquals("camera", evidence["cameraId"].asText())
+            assertEquals(1001, evidence["timestamp"].asLong())
+            assertEquals(7, evidence["sequence"].asLong())
+            assertEquals("VISION", evidence["source"].asText())
+            assertEquals(0.95, evidence["confidence"].asDouble(), 0.0)
+            assertTrue(evidence["valid"].asBoolean())
+            assertEquals(1.8, measurement["diameterMm"].asDouble(), 0.0)
+            assertEquals("NORMAL", measurement["status"].asText())
+            if (path == "state") {
+                assertEquals(1, root["data"]["cameras"].size())
+                assertEquals("camera", root["data"]["cameras"][0]["cameraId"].asText())
+            }
             assertSafe(text)
             assertEquals(callName to listOf("device1"), backend.calls.last())
         }
@@ -81,10 +85,10 @@ class RestContractTest {
         val save = client.put(base) { contentType(ContentType.Application.Json); setBody("""{"commandId":"save1","configuration":$configJson}""") }
         assertEquals(HttpStatusCode.OK, save.status)
         val actual = backend.calls.last().second[2] as MonitoringConfiguration
-        assertEquals(0.09, actual.cameraA.calibration.mmPerPixel, 0.0); assertEquals(90, actual.cameraA.geometry.rotationDegrees)
+        assertEquals(0.09, actual.vision.calibration.mmPerPixel, 0.0); assertEquals(90, actual.vision.geometry.rotationDegrees)
         assertEquals(12, actual.writeBatchSize); assertEquals(500, actual.flushIntervalMillis); assertEquals(200, actual.realtimeCapacity)
         assertEquals(4, actual.previewFramesPerSecond); assertEquals(250, actual.publicationIntervalMillis)
-        assertEquals(0.6, actual.fusion.cameraAWeight, 0.0)
+        assertNull(actual.legacy)
         backend.configOutcome = ConfigurationApplyOutcome.APPLIED
         val apply = client.post("$base/apply") { contentType(ContentType.Application.Json); setBody("""{"commandId":"apply1","revision":3,"expectedSavedRevision":3}""") }
         assertEquals(HttpStatusCode.OK, apply.status)
@@ -127,7 +131,8 @@ class RestContractTest {
     @Test fun camerasDiagnosticsErrorsAndSnapshotMetadataExposeOnlyPublicValues() = testApplication {
         val backend = FakeBackend(); application { installRestApi(backend) { "corr1" } }
         val cameras = client.get("/api/v1/devices/device1/cameras")
-        assertEquals(HttpStatusCode.OK, cameras.status); assertEquals("UNAVAILABLE", parse(cameras.bodyAsText())["data"][1]["state"].asText())
+        assertEquals(HttpStatusCode.OK, cameras.status); assertEquals(1, parse(cameras.bodyAsText())["data"].size())
+        assertEquals("camera", parse(cameras.bodyAsText())["data"][0]["cameraId"].asText())
         val diagnostics = client.get("/api/v1/devices/device1/diagnostics")
         assertEquals(HttpStatusCode.OK, diagnostics.status)
         assertEquals(9.0, parse(diagnostics.bodyAsText())["data"]["cameras"][0]["processed"]["perSecond"].asDouble(), 0.0)
@@ -219,13 +224,13 @@ class RestContractTest {
     }
 
     @Test fun nonfiniteDomainEvidenceMapsToNullRatherThanInvalidJson() = testApplication {
-        val backend = FakeBackend().apply { measurement = sample.copy(cameraA = camera.copy(pixelWidth = Double.NaN, diameterMm = Double.POSITIVE_INFINITY, confidence = Double.NEGATIVE_INFINITY), fusedDiameter = Double.NaN, shapeDifference = Double.POSITIVE_INFINITY, confidence = Double.NaN) }
+        val backend = FakeBackend().apply { measurement = sample.copy(evidence = listOf(camera.copy(pixelWidth = Double.NaN, diameterMm = Double.POSITIVE_INFINITY, confidence = Double.NEGATIVE_INFINITY)), diameterMm = Double.NaN, confidence = Double.NaN) }
         application { installRestApi(backend) { "corr1" } }
         val response = client.get("/api/v1/devices/device1/measurements/latest")
         assertEquals(HttpStatusCode.OK, response.status)
         val data = parse(response.bodyAsText())["data"]["measurement"]
-        listOf("fusedDiameter", "shapeDifference", "confidence", "diameterA").forEach { assertTrue(data[it].isNull) }
-        listOf("pixelWidth", "diameterMm", "confidence").forEach { assertTrue(data["cameraA"][it].isNull) }
+        listOf("diameterMm", "confidence").forEach { assertTrue(data[it].isNull) }
+        listOf("pixelWidth", "diameterMm", "confidence").forEach { assertTrue(data["evidence"][0][it].isNull) }
         assertSafe(response.bodyAsText())
     }
 
@@ -245,14 +250,16 @@ class RestContractTest {
         application { installRestApi(facade) { "corr1" } }
         val empty = client.get("/api/v1/devices/device1/measurements/latest")
         assertEquals(HttpStatusCode.OK, empty.status); assertTrue(parse(empty.bodyAsText())["data"].isNull)
-        backend.measurement = sample.copy(cameraA = null, cameraB = camera.copy(cameraId = CameraId("B"), timestamp = 1002, sequence = 9),
-            status = MeasurementStatus.CAMERA_A_FAILURE, fusionReason = FusionReason.CAMERA_A_MISSING)
+        backend.measurement = com.filamentvision.core.model.OfficialMeasurement(null, camera.copy(cameraId = CameraId("B"), timestamp = 1002, sequence = 9),
+            1.8, 0.0, 0.95, MeasurementStatus.CAMERA_A_FAILURE, 1002, FusionReason.CAMERA_A_MISSING)
         val response = client.get("/api/v1/devices/device1/state")
         assertEquals(HttpStatusCode.OK, response.status)
         val sample = parse(response.bodyAsText())["data"]["latestMeasurement"]
-        assertTrue(sample["cameraA"].isNull); assertTrue(sample["diameterA"].isNull)
-        assertEquals("B", sample["cameraB"]["cameraId"].asText()); assertEquals(9, sample["cameraB"]["sequence"].asLong())
-        assertEquals(1002, sample["cameraB"]["timestamp"].asLong()); assertSafe(response.bodyAsText())
+        assertFalse(sample.has("cameraA")); assertFalse(sample.has("diameterA"))
+        assertEquals(1, sample["evidence"].size())
+        assertEquals("B", sample["evidence"][0]["cameraId"].asText()); assertEquals(9, sample["evidence"][0]["sequence"].asLong())
+        assertEquals(1002, sample["evidence"][0]["timestamp"].asLong())
+        assertEquals("DEGRADED", sample["status"].asText()); assertSafe(response.bodyAsText())
     }
 
     @Test fun configurationNonfiniteOutputFailsSafelyBeforeSendingJson() = testApplication {

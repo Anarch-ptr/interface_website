@@ -22,6 +22,7 @@ import kotlinx.coroutines.CancellationException
 fun Application.installRestApi(backend: BackendApplication, correlationId: () -> String = { UUID.randomUUID().toString() }) {
     routing {
         route("/api/v1") {
+            get("/network-interfaces") { api(correlationId) { reply(it, backend.networkInterfaces().toDto()) } }
             route("/devices/{deviceId}") {
                 get("/state") { api(correlationId) { reply(it, backend.state(id("deviceId")).toDto()) } }
                 get("/measurements/latest") { api(correlationId) { reply(it, backend.latest(id("deviceId"))?.toDto()) } }
@@ -61,7 +62,8 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                 } }
                 put("/udp-input-configuration") { api(correlationId) { correlation ->
                     val request = body<SaveUdpInputConfigurationRequest>(); command(request.commandId)
-                    reply(correlation, backend.saveUdpInput(id("deviceId"), request.commandId, request.configuration.toDomain()).toDto())
+                    valid(request.expectedSavedRevision > 0)
+                    reply(correlation, backend.saveUdpInput(id("deviceId"), request.commandId, request.expectedSavedRevision, request.configuration.toDomain()).toDto())
                 } }
                 post("/udp-input-configuration/apply") { api(correlationId) { correlation ->
                     val request = body<ApplyUdpInputConfigurationRequest>(); command(request.commandId)
@@ -83,9 +85,8 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                 } }
                 get("/cameras") { api(correlationId) { reply(it, backend.cameras(id("deviceId")).map { camera -> camera.toDto() }) } }
                 get("/diagnostics") { api(correlationId) { reply(it, backend.diagnostics(id("deviceId")).toDto()) } }
-                get("/cameras/{cameraId}/udp-diagnostics") { api(correlationId) { correlation ->
-                    val camera = id("cameraId")
-                    reply(correlation, backend.udpDiagnostics(id("deviceId"), camera).toDto(camera))
+                get("/udp-diagnostics") { api(correlationId) { correlation ->
+                    reply(correlation, backend.udpDiagnostics(id("deviceId")).toDto())
                 } }
                 post("/cameras/{cameraId}/packet-inspector/lease") { api(correlationId) { correlation ->
                     val request = body<CreatePacketInspectorLeaseRequest>()
@@ -191,6 +192,8 @@ private suspend fun RoutingContext.api(generator: () -> String, block: suspend (
                 ApplicationFailureCode.CONFLICT -> ApiHttpFailure(HttpStatusCode.Conflict, "CONFLICT", "Command conflicts with current state")
                 ApplicationFailureCode.REQUIRES_STOP -> ApiHttpFailure(HttpStatusCode.Conflict, "REQUIRES_STOP", "Stop monitoring before applying this revision")
                 ApplicationFailureCode.UNAVAILABLE -> ApiHttpFailure(HttpStatusCode.ServiceUnavailable, "UNAVAILABLE", "Operation unavailable")
+                ApplicationFailureCode.UDP_BIND_FAILED -> ApiHttpFailure(HttpStatusCode.Conflict, "UDP_BIND_FAILED", "UDP endpoint could not be bound")
+                ApplicationFailureCode.UDP_APPLY_CONSISTENCY_FAILURE -> ApiHttpFailure(HttpStatusCode.ServiceUnavailable, "UDP_APPLY_CONSISTENCY_FAILURE", "UDP configuration consistency unavailable")
             }
             is RepositoryException -> when (failure.failure) {
                 RepositoryFailure.INVALID -> badRequest()

@@ -4,8 +4,10 @@ import com.filamentvision.core.config.*
 import com.filamentvision.core.metrics.MetricsSnapshot
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
-import com.filamentvision.backend.input.profile.UdpInputProfileSet
-import com.filamentvision.backend.input.runtime.UdpApplyOutcome
+import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.runtime.RaspberryPiUdpApplyOutcome
+import com.filamentvision.backend.input.runtime.UdpOperationalStatusSnapshot
+import com.filamentvision.backend.input.network.*
 import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
 import com.filamentvision.backend.input.inspector.*
 
@@ -32,9 +34,10 @@ interface BackendApplication {
     suspend fun apply(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): ConfigurationView
     suspend fun saveAndApply(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView
     suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView
-    suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView
+    suspend fun saveUdpInput(deviceId: String, commandId: String, expectedSavedRevision: Long, profile: RaspberryPiUdpInputProfile): UdpInputConfigurationView
     suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView
-    suspend fun udpDiagnostics(deviceId: String, cameraId: String): UdpDiagnosticsSnapshot
+    suspend fun udpDiagnostics(deviceId: String): UdpDiagnosticsView
+    suspend fun networkInterfaces(): NetworkInterfacesView
     suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): PacketInspectorLease
     suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String)
     suspend fun packetInspectorSnapshot(deviceId: String, cameraId: String, leaseId: String, previewBytes: Int): PacketInspectorSnapshot
@@ -49,7 +52,7 @@ interface BackendApplication {
     suspend fun snapshot(snapshotId: String): SnapshotContent
 }
 
-enum class ApplicationFailureCode { INVALID, NOT_FOUND, CONFLICT, REQUIRES_STOP, UNAVAILABLE }
+enum class ApplicationFailureCode { INVALID, NOT_FOUND, CONFLICT, REQUIRES_STOP, UNAVAILABLE, UDP_BIND_FAILED, UDP_APPLY_CONSISTENCY_FAILURE }
 class ApplicationFailure(val code: ApplicationFailureCode) : RuntimeException()
 data class PageQuery(val after: HistoryCursor? = null, val limit: Int = 100, val from: Long? = null, val through: Long? = null)
 data class SessionPage(val items: List<SessionRecord>, val nextCursor: HistoryCursor?)
@@ -61,7 +64,11 @@ data class DeviceView(val deviceId: String, val connection: ConnectionState, val
 data class ConfigurationView(val revisions: ConfigurationRevisions, val saved: ConfigurationRevision?,
     val outcome: ConfigurationApplyOutcome? = null)
 data class UdpInputConfigurationView(val savedRevision: Long, val appliedRevision: Long,
-    val configuration: UdpInputProfileSet, val outcome: UdpApplyOutcome? = null)
+    val configuration: RaspberryPiUdpInputProfile, val appliedConfiguration: RaspberryPiUdpInputProfile,
+    val outcome: RaspberryPiUdpApplyOutcome? = null)
+data class UdpDiagnosticsView(val operational: UdpOperationalStatusSnapshot, val counters: UdpDiagnosticsSnapshot)
+data class NetworkInterfacesView(val interfaces: List<Ipv4NetworkInterfaceEntry>, val selection: NetworkInterfaceSelection,
+    val resolution: BackendIpv4Resolution, val listenPort: Int)
 data class DraftView(val id: String, val cameraId: String, val revision: Long, val configuration: VisionConfiguration)
 data class DiagnosticsView(val metrics: MetricsSnapshot, val queuedMeasurements: Int, val retainedSnapshots: Int,
     val retainedSnapshotBytes: Long, val backendVersion: String)

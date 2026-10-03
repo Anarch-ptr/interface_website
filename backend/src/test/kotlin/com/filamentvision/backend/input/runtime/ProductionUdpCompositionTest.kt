@@ -113,14 +113,11 @@ class ProductionUdpCompositionTest {
         } finally { reopened.close() }
     }
 
-    @Test fun oldUdpAndInspectorContractsFailClosedUntilTheirApiMigration() = runBlocking {
+    @Test fun oldInspectorContractsFailClosedUntilTheirApiMigration() = runBlocking {
         val c = BackendComposition.open(path("legacy-api.db"), path("legacy-api-objects"))
         try {
             val before = c.udpProfileRepository.state()
             val calls: List<suspend () -> Any?> = listOf(
-                { c.application.udpInputConfiguration(c.deviceId) },
-                { c.application.applyUdpInput(c.deviceId, "old-apply", 1, 1) },
-                { c.application.udpDiagnostics(c.deviceId, "A") },
                 { c.application.createPacketInspectorLease(c.deviceId, "A", 64) },
                 { c.application.releasePacketInspectorLease(c.deviceId, "A", "lease") },
                 { c.application.packetInspectorSnapshot(c.deviceId, "A", "lease", 64) },

@@ -13,18 +13,17 @@ import java.lang.ref.WeakReference
 fun Application.installPreviewWebSocket(hub: LatestPreviewHub, keys: Set<PreviewKey>, encoder: PreviewEncoder,
     maximumFramesPerSecond: () -> Int = { 30 }) {
     val allowed = keys.toSet()
-    require(allowed.isNotEmpty())
+    require(allowed.size == 1 && allowed.single().cameraId.value == "camera")
     allowed.forEach { hub.latest(it) }
     ensureWebSockets()
     routing {
         webSocket("/api/v1/previews") {
             readOnlyStream {
                 val query = call.request.queryParameters
-                subscriptionValid(query.names().all { it in setOf("deviceId", "cameraId", "stage", "maxFps") })
+                subscriptionValid(query.names().all { it in setOf("deviceId", "stage", "maxFps") })
                 val device = query.singleQuery("deviceId") ?: allowed.map { it.deviceId }.distinct().singleOrNull()
-                val camera = query.singleQuery("cameraId")
                 val stage = query.singleQuery("stage")
-                val key = allowed.singleOrNull { it.deviceId == device && it.cameraId.value == camera && it.stage.name == stage }
+                val key = allowed.singleOrNull { it.deviceId == device && it.stage.name == stage }
                 subscriptionValid(key != null)
                 val rawFps = query.singleQuery("maxFps")
                 val fps = rawFps?.toIntOrNull() ?: if (rawFps == null) 5 else 0

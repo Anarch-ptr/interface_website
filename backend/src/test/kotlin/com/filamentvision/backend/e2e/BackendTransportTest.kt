@@ -33,7 +33,7 @@ class BackendTransportTest {
             c.source.setScenario(SimulationScenario.HIGH_DIAMETER)
             ws.webSocket("/api/v1/events?afterSequence=0") {
                 val stream = this
-                ws.webSocket("/api/v1/previews?cameraId=camera&stage=RAW") {
+                ws.webSocket("/api/v1/previews?stage=RAW") {
                     val metadata = withTimeout(10000) { incoming.receive() } as Frame.Text
                     assertEquals("camera", apiJson.readTree(metadata.readText())["cameraId"].asText())
                     val bytes = (withTimeout(10000) { incoming.receive() } as Frame.Binary).readBytes()
@@ -43,9 +43,10 @@ class BackendTransportTest {
                 val latestResponse = client.get("/api/v1/devices/filamentvision-1/measurements/latest")
                 assertEquals(HttpStatusCode.OK, latestResponse.status)
                 val latest = apiJson.readTree(latestResponse.bodyAsText())["data"]["measurement"]
-                assertTrue(latest["fusedDiameter"].asDouble() >= 1.8)
-                assertTrue(latest["cameraA"].isNull && latest["cameraB"].isNull)
-                assertTrue(latest["shapeDifference"].isNull && latest["fusionReason"].isNull)
+                assertTrue(latest["diameterMm"].asDouble() >= 1.8)
+                assertEquals(1, latest["evidence"].size())
+                assertEquals("camera", latest["evidence"][0]["cameraId"].asText())
+                assertFalse(latest.has("cameraA") || latest.has("cameraB") || latest.has("shapeDifference") || latest.has("fusionReason"))
                 val stop = (1..8).map { async { post("stop", "same-stop") } }.awaitAll()
                 assertTrue(stop.all { it.status == HttpStatusCode.OK })
                 var previous = 0L; val types = mutableSetOf<String>()
@@ -56,8 +57,8 @@ class BackendTransportTest {
                         assertEquals(previous + 1, sequence); previous = sequence; types += event["type"].asText()
                         if (event["type"].asText() == "measurement.sample") {
                             val measurement = event["payload"]["measurement"]
-                            assertTrue(measurement["fusedDiameter"].asDouble() > 0)
-                            assertTrue(measurement["shapeDifference"].isNull && measurement["fusionReason"].isNull)
+                            assertTrue(measurement["diameterMm"].asDouble() > 0)
+                            assertFalse(measurement.has("shapeDifference") || measurement.has("fusionReason"))
                         }
                     }
                 }

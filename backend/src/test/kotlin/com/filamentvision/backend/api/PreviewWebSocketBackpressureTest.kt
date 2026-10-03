@@ -19,6 +19,18 @@ import java.io.ByteArrayInputStream
 import javax.imageio.ImageIO
 
 class PreviewWebSocketBackpressureTest {
+    @Test fun singlePreviewNeedsNoCameraSelectorAndRejectsLegacySelector() = testApplication {
+        val key = previewKey("camera"); val hub = LatestPreviewHub(setOf(key), 100, 2)
+        hub.publish(previewFrame(key, 1))
+        application { installPreviewWebSocket(hub, setOf(key), PngPreviewEncoder()) }
+        val ws = createClient { install(WebSockets) }
+        ws.webSocket("/api/v1/previews?deviceId=device&stage=RAW&maxFps=5") {
+            assertImage(1, "camera", "RAW"); close()
+        }
+        ws.webSocket("/api/v1/previews?deviceId=device&cameraId=A&stage=RAW") {
+            assertEquals("INVALID_SUBSCRIPTION", nextJson()["code"].asText())
+        }
+    }
     @Test fun configuredHighPreviewRateIsCappedWithoutRejectingValidMonitoringConfiguration() {
         var now = 0L
         var fps = 60
@@ -81,7 +93,7 @@ class PreviewWebSocketBackpressureTest {
         ws.webSocket("/api/v1/events") {
             val eventSocket = this
             assertEquals("state.snapshot", nextJson()["type"].asText())
-            ws.webSocket("/api/v1/previews?cameraId=camera&stage=RAW&maxFps=30") {
+            ws.webSocket("/api/v1/previews?stage=RAW&maxFps=30") {
                 assertTrue(publisher.tryPublish(cameraPreviewSource(1)))
                 withTimeout(3000) { entered.await() }
                 repeat(1000) { index ->
@@ -145,7 +157,7 @@ class PreviewWebSocketBackpressureTest {
         ws.webSocket("/api/v1/events") {
             nextJson()
             repeat(2) {
-                ws.webSocket("/api/v1/previews?cameraId=A&stage=RAW") {
+                ws.webSocket("/api/v1/previews?stage=RAW") {
                     hub.publish(previewFrame(key, it + 1L))
                     val failure = nextJson()
                     assertEquals("STREAM_UNAVAILABLE", failure["code"].asText()); assertFalse(failure.toString().contains("secret"))
@@ -168,7 +180,7 @@ class PreviewWebSocketBackpressureTest {
         }
         application { installPreviewWebSocket(hub, setOf(key), encoder) }
         val ws = createClient { install(WebSockets) }
-        ws.webSocket("/api/v1/previews?cameraId=A&stage=RAW") {
+        ws.webSocket("/api/v1/previews?stage=RAW") {
             hub.publish(previewFrame(key, 1)); withTimeout(3000) { entered.await() }
             hub.publish(previewFrame(key, 2)); assertEquals(1, hub.metrics.pendingFrames)
             close()
@@ -202,7 +214,7 @@ class PreviewWebSocketBackpressureTest {
         ws.webSocket("/api/v1/events") {
             val eventSocket = this
             assertEquals("state.snapshot", nextJson()["type"].asText())
-            ws.webSocket("/api/v1/previews?cameraId=A&stage=RAW&maxFps=30") {
+            ws.webSocket("/api/v1/previews?stage=RAW&maxFps=30") {
                 hub.publish(previewFrame(key, 1))
                 withTimeout(3000) { entered.await() }
                 repeat(1000) { index -> hub.publish(previewFrame(key, index + 2L)); events.publish(error()) }
@@ -211,8 +223,8 @@ class PreviewWebSocketBackpressureTest {
                 assertEquals(999L, hub.metrics.droppedFrames)
                 repeat(1000) { assertEquals(it + 1L, eventSocket.nextJson()["sequence"].asLong()) }
                 release.complete(Unit)
-                assertImage(1, "A", "RAW")
-                assertImage(1001, "A", "RAW")
+                assertImage(1, "camera", "RAW")
+                assertImage(1001, "camera", "RAW")
                 close()
             }
             close()
@@ -221,16 +233,15 @@ class PreviewWebSocketBackpressureTest {
         assertEquals(0, hub.metrics.pendingFrames)
     }
 
-    @Test fun cameraAndStageSubscriptionsRemainSeparateAndDisconnectCleansUp() = testApplication {
-        val keys = setOf(previewKey(), previewKey("B"), previewKey("A", PreviewStage.EDGE))
+    @Test fun singleKeySubscriptionsShareLatestAndDisconnectCleansUp() = testApplication {
+        val keys = setOf(previewKey())
         val hub = LatestPreviewHub(keys, 100, 4)
         keys.forEachIndexed { index, key -> hub.publish(previewFrame(key, index + 10L)) }
         application { installPreviewWebSocket(hub, keys, PngPreviewEncoder()) }
         val ws = createClient { install(WebSockets) }
-        ws.webSocket("/api/v1/previews?cameraId=A&stage=RAW") {
-            assertImage(10, "A", "RAW")
-            ws.webSocket("/api/v1/previews?cameraId=B&stage=RAW") { assertImage(11, "B", "RAW"); close() }
-            ws.webSocket("/api/v1/previews?cameraId=A&stage=EDGE") { assertImage(12, "A", "EDGE"); close() }
+        ws.webSocket("/api/v1/previews?stage=RAW") {
+            assertImage(10, "camera", "RAW")
+            ws.webSocket("/api/v1/previews?stage=RAW") { assertImage(10, "camera", "RAW"); close() }
             close()
         }
         withTimeout(3000) { while (hub.metrics.subscribers != 0) delay(5) }
@@ -241,9 +252,9 @@ class PreviewWebSocketBackpressureTest {
         val key = previewKey(); val hub = LatestPreviewHub(setOf(key), 100, 4)
         application { installPreviewWebSocket(hub, setOf(key), PngPreviewEncoder()) }
         val ws = createClient { install(WebSockets) }
-        for (query in listOf("", "cameraId=X&stage=RAW", "cameraId=A&stage=NONE", "cameraId=A&stage=RAW&maxFps=0",
-            "cameraId=A&stage=RAW&maxFps=31", "cameraId=A&stage=RAW&maxFps=NaN", "cameraId=A&cameraId=A&stage=RAW",
-            "cameraId=A&stage=RAW&deviceId=unknown")) {
+        for (query in listOf("", "cameraId=X&stage=RAW", "stage=NONE", "stage=RAW&maxFps=0",
+            "stage=RAW&maxFps=31", "stage=RAW&maxFps=NaN", "stage=RAW&stage=RAW",
+            "stage=RAW&deviceId=unknown", "cameraId=camera&stage=RAW")) {
             ws.webSocket("/api/v1/previews?$query") {
                 assertEquals("INVALID_SUBSCRIPTION", nextJson()["code"].asText())
                 assertEquals(1008.toShort(), withTimeout(3000) { closeReason.await() }!!.code)
@@ -271,7 +282,7 @@ class PreviewWebSocketBackpressureTest {
     }
 }
 
-internal fun previewKey(camera: String = "A", stage: PreviewStage = PreviewStage.RAW) = PreviewKey("device", CameraId(camera), stage)
+internal fun previewKey(camera: String = "camera", stage: PreviewStage = PreviewStage.RAW) = PreviewKey("device", CameraId(camera), stage)
 private fun cameraPreviewSource(sequence: Long, lease: FrameLease = FrameLease()) = CameraFrame(CameraId("camera"),
     2000 + sequence, 0, 2, 1, PixelFormat.ARGB32, PixelBuffer.ints(intArrayOf(0xff112233.toInt(), 0xffabcdef.toInt())),
     0, false, sequence, lease = lease)

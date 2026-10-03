@@ -68,7 +68,7 @@ class EventWebSocketTest {
                 assertEquals(expectedTimes[index], event["occurredAt"].asLong())
                 assertEquals("device", event["deviceId"].asText())
                 assertFalse(event.toString().contains("secret"))
-                if (index == 1) assertEquals(7, event["payload"]["measurement"]["cameraA"]["sequence"].asInt())
+                if (index == 1) assertEquals(7, event["payload"]["measurement"]["evidence"][0]["sequence"].asInt())
             }
             close()
         }

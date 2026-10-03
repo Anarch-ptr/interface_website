@@ -4,14 +4,18 @@ import com.filamentvision.backend.application.*
 import com.filamentvision.core.config.*
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
-import com.filamentvision.backend.input.profile.UdpInputProfileSet
+import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.network.*
 import com.filamentvision.backend.input.runtime.*
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-internal class ComposedBackendApplication(private val c: BackendComposition) : BackendApplication {
+internal class ComposedBackendApplication(private val c: BackendComposition,
+    private val interfaces: Ipv4NetworkInterfaceProvider = JavaIpv4NetworkInterfaceProvider(),
+    private val routeProbe: Ipv4RouteProbe = JavaIpv4RouteProbe(),
+) : BackendApplication {
     private val results = linkedMapOf<Triple<String, String, String>, Any>()
     private val drafts = linkedMapOf<String, DraftView>()
     val cachedCommandCount get() = results.size
@@ -90,19 +94,70 @@ internal class ComposedBackendApplication(private val c: BackendComposition) : B
     override suspend fun saveAndApply(deviceId: String, commandId: String, configuration: MonitoringConfiguration): ConfigurationView {
         device(deviceId); return dedup("saveAndApply", commandId) { configurationChanged(c.io { service.saveAndApply(configuration.copy(legacy = null)) }) }
     }
-    // The old REST/Inspector signatures remain until Tasks 18/19. They must not project
-    // the single stream into invented A/B profiles or mutate historical UDP revisions.
+    private suspend fun udpView(outcome: RaspberryPiUdpApplyOutcome? = null): UdpInputConfigurationView {
+        val state = c.io { c.udpProfileRepository.state() }
+        return UdpInputConfigurationView(state.saved.revision, state.applied.revision,
+            state.saved.profile, state.applied.profile, outcome)
+    }
+    override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView {
+        device(deviceId); return c.commands.withLock { udpView() }
+    }
+    override suspend fun saveUdpInput(deviceId: String, commandId: String, expectedSavedRevision: Long,
+        profile: RaspberryPiUdpInputProfile): UdpInputConfigurationView {
+        device(deviceId)
+        return dedup("udpSave", commandId) {
+            udpOperation { c.io { (c.udpInputService ?: unavailableUdp(deviceId)).save(expectedSavedRevision, profile) } }
+            udpView()
+        }
+    }
+    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
+        expectedSavedRevision: Long): UdpInputConfigurationView {
+        device(deviceId)
+        return dedup("udpApply", commandId) {
+            val savedRevision = c.io { c.udpProfileRepository.state().saved.revision }
+            if (savedRevision != expectedSavedRevision) conflict()
+            // Revisions are append-only; an identity beyond the newest saved revision cannot exist.
+            if (revision > savedRevision) missing()
+            val result = udpOperation { c.io { (c.udpInputService ?: unavailableUdp(deviceId)).apply(revision) } }
+            when (result.outcome) {
+                RaspberryPiUdpApplyOutcome.CONFLICT -> conflict()
+                RaspberryPiUdpApplyOutcome.INVALID -> throw ApplicationFailure(ApplicationFailureCode.INVALID)
+                RaspberryPiUdpApplyOutcome.APPLIED -> udpView(result.outcome)
+            }
+        }
+    }
+    private suspend fun <T> udpOperation(action: suspend () -> T): T = try { action() }
+        catch (_: RaspberryPiUdpConsistencyException) { throw ApplicationFailure(ApplicationFailureCode.UDP_APPLY_CONSISTENCY_FAILURE) }
+        catch (_: java.net.SocketException) { throw ApplicationFailure(ApplicationFailureCode.UDP_BIND_FAILED) }
+        catch (failure: IllegalStateException) {
+            throw when (failure.message) {
+                "SELECTED_IPV4_INTERFACE_UNAVAILABLE" -> ApplicationFailure(ApplicationFailureCode.UDP_BIND_FAILED)
+                "UDP_APPLIED_STATE_MISMATCH" -> ApplicationFailure(ApplicationFailureCode.UDP_APPLY_CONSISTENCY_FAILURE)
+                else -> failure
+            }
+        }
+    override suspend fun udpDiagnostics(deviceId: String): UdpDiagnosticsView {
+        device(deviceId)
+        return c.commands.withLock {
+            val source = c.inputSource as? RaspberryPiUdpInputSource ?: unavailableUdp(deviceId)
+            UdpDiagnosticsView(source.operationalStatus(), source.udpDiagnostics())
+        }
+    }
+    override suspend fun networkInterfaces(): NetworkInterfacesView = c.commands.withLock {
+        val profile = c.io { c.udpProfileRepository.state().saved.profile }
+        c.io {
+            // Resolve and enumerate against the same inventory snapshot; never expose wildcard binding.
+            val eligible = interfaces.listEligible().filter { it.isEligible() }
+            val resolution = BackendIpv4Resolver(Ipv4NetworkInterfaceProvider { eligible }, routeProbe)
+                .resolve(profile.networkInterface, profile.raspberryPiIpv4)
+            NetworkInterfacesView(eligible, profile.networkInterface, resolution, profile.listenPort)
+        }
+    }
+    // Packet Inspector retains its historical signatures until Task 19.
     private fun unavailableUdp(deviceId: String): Nothing {
         device(deviceId)
         throw ApplicationFailure(ApplicationFailureCode.UNAVAILABLE)
     }
-    override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView = unavailableUdp(deviceId)
-    override suspend fun saveUdpInput(deviceId: String, commandId: String, profiles: UdpInputProfileSet): UdpInputConfigurationView =
-        unavailableUdp(deviceId)
-    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
-        expectedSavedRevision: Long): UdpInputConfigurationView = unavailableUdp(deviceId)
-    override suspend fun udpDiagnostics(deviceId: String, cameraId: String): com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot =
-        unavailableUdp(deviceId)
     override suspend fun createPacketInspectorLease(deviceId: String, cameraId: String, previewBytes: Int): com.filamentvision.backend.input.inspector.PacketInspectorLease =
         unavailableUdp(deviceId)
     override suspend fun releasePacketInspectorLease(deviceId: String, cameraId: String, leaseId: String): Unit = unavailableUdp(deviceId)

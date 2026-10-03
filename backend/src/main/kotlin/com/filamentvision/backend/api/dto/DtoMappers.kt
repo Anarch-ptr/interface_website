@@ -10,14 +10,14 @@ import com.filamentvision.core.runtime.RuntimeSession
 import com.filamentvision.core.session.SessionStatistics
 import com.filamentvision.core.vision.CameraMeasurement
 import io.ktor.http.encodeURLPathPart
-import com.filamentvision.backend.input.diagnostics.UdpDiagnosticsSnapshot
 
 private fun Double.safe(): Double? = takeIf { isFinite() }
 fun CameraMeasurement.toDto() = CameraMeasurementDto(cameraId.value, timestamp, sequence, pixelWidth?.safe(), diameterMm.safe(), confidence.safe(), valid, source.name)
-// Keep the old transport vocabulary until the API migration, without inventing legacy fusion fields.
-fun OfficialMeasurement.toDto() = MeasurementDto(legacyFusion?.cameraA?.toDto(), legacyFusion?.cameraB?.toDto(),
-    legacyFusion?.cameraA?.diameterMm?.safe(), legacyFusion?.cameraB?.diameterMm?.safe(),
-    diameterMm.safe(), legacyFusion?.shapeDifference?.safe(), confidence.safe(), status.name, legacyFusion?.fusionReason?.name, timestamp)
+fun OfficialMeasurement.toDto() = MeasurementDto(evidence.map { it.toDto() }, diameterMm.safe(), confidence.safe(),
+    when (status) {
+        MeasurementStatus.CAMERA_A_FAILURE, MeasurementStatus.CAMERA_B_FAILURE -> "DEGRADED"
+        else -> status.name
+    }, timestamp)
 fun MeasurementRecord.toDto() = MeasurementRecordDto(id, sessionId, appliedRevision, measurement.toDto())
 fun RuntimeSession.toDto() = SessionDto(id, startedAtEpochMillis, null, null, null)
 fun SessionRecord.toDto() = SessionDto(session.id, session.startedAtEpochMillis, finalization?.endedAtEpochMillis,
@@ -36,18 +36,12 @@ fun DiagnosticsView.toDto() = DiagnosticsDto(metrics.elapsedMillis,
     metrics.counters.map { (key, value) -> CounterDto(key.name, value.toDto()) },
     metrics.latencies.map { (key, value) -> LatencyDto(key.name, value.count, value.totalMillis.safe(), value.maximumMillis.safe()) },
     queuedMeasurements, retainedSnapshots, retainedSnapshotBytes, backendVersion)
-fun UdpDiagnosticsSnapshot.toDto(cameraId: String) = UdpDiagnosticsDto(cameraId, transportMode.name,
-    datagramsReceived, bytesReceived, framesStarted, framesCompleted, framesDropped, duplicateChunks, outOfOrderChunks,
-    missingChunks, lateChunks, reassemblyTimeouts, invalidTransportHeaders, oversizedFrames, invalidHeaderCount,
-    invalidFooterCount, invalidPayloadSizeCount, decodeFailures, sourceFilteredDatagrams, oversizedOrTruncatedDatagrams,
-    lastPacketMonotonicNanos, lastValidFrameMonotonicNanos)
 // Repository error messages may contain platform details. Only a public machine code crosses HTTP.
 fun ErrorRecord.toDto() = ErrorRecordDto(id, sessionId, timestamp,
     code.takeIf { it.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) } ?: "DEVICE_ERROR", "Device error")
 fun SnapshotRecord.toDto() = SnapshotDto(id, sessionId, timestamp, cameraId, sourceSequence, "/api/v1/snapshots/${id.encodeURLPathPart()}")
 
-fun ConfigurationDto.toDomain() = MonitoringConfiguration(cameraA.toDomain(), cameraB.toDomain(),
-    FusionConfiguration(fusion.cameraAWeight, fusion.cameraBWeight, fusion.minimumConfidence, fusion.maximumTimestampDifferenceMillis),
+fun ConfigurationDto.toDomain() = MonitoringConfiguration(vision.toDomain(),
     targetDiameter, writeBatchSize, flushIntervalMillis, realtimeCapacity, previewFramesPerSecond, publicationIntervalMillis).also { it.validate() }
 fun VisionConfigurationDto.toDomain(): VisionConfiguration {
     val c = calibration
@@ -56,7 +50,7 @@ fun VisionConfigurationDto.toDomain(): VisionConfiguration {
     return VisionConfiguration(CalibrationProfile(c.roiLeft, c.roiTop, c.roiRight, c.roiBottom, gray, threshold, c.manualThreshold,
         c.edgeSensitivity, c.minimumPixelWidth, c.maximumPixelWidth, c.mmPerPixel, c.minimumConfidence),
         ImageGeometry(geometry.rotationDegrees, geometry.mirrorHorizontally, geometry.mirrorVertically)).also {
-        MonitoringConfiguration(cameraA = it, cameraB = it).validate()
+        MonitoringConfiguration(vision = it).validate()
     }
 }
 fun VisionConfiguration.toDto(): VisionConfigurationDto {
@@ -65,8 +59,7 @@ fun VisionConfiguration.toDto(): VisionConfigurationDto {
         c.manualThreshold, c.edgeSensitivity, c.minimumPixelWidth, c.maximumPixelWidth, c.mmPerPixel, c.minimumConfidence),
         GeometryDto(geometry.rotationDegrees, geometry.mirrorHorizontally, geometry.mirrorVertically))
 }
-fun MonitoringConfiguration.toDto() = ConfigurationDto(cameraA.toDto(), cameraB.toDto(),
-    FusionConfigurationDto(fusion.cameraAWeight, fusion.cameraBWeight, fusion.minimumConfidence, fusion.maximumTimestampDifferenceMillis),
+fun MonitoringConfiguration.toDto() = ConfigurationDto(vision.toDto(),
     targetDiameter, writeBatchSize, flushIntervalMillis, realtimeCapacity, previewFramesPerSecond, publicationIntervalMillis)
 fun ConfigurationView.toDto() = ConfigurationStateDto(revisions.savedRevision, revisions.appliedRevision, saved?.configuration?.toDto(), outcome?.name)
 fun DraftView.toDto() = DraftDto(id, cameraId, revision, configuration.toDto())
