@@ -85,7 +85,9 @@ class PacketInspectorApiTest {
                 assertFalse(parse(created.bodyAsText())["data"].has("cameraId"))
                 assertEquals(HttpStatusCode.NotFound, client.get("$path?leaseId=$lease&previewBytes=64").status)
                 send()
-                withTimeout(3000) { while (source.packetInspector.retainedSnapshotCount == 0) delay(5) }
+                // Do not take the polling lock while awaiting this optional tryLock capture:
+                // the observer is allowed to drop the single datagram if the test itself holds it.
+                withTimeout(3000) { while (source.packetInspector.previewCopies == 0L) delay(5) }
                 val polled = client.get("$path?leaseId=$lease&previewBytes=64")
                 assertEquals(HttpStatusCode.OK, polled.status)
                 val raw = parse(polled.bodyAsText())["data"]["rawDatagram"]

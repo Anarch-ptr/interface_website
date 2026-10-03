@@ -7,6 +7,12 @@ import com.filamentvision.core.model.OfficialMeasurement
 import com.filamentvision.core.repository.*
 import com.filamentvision.core.runtime.*
 import com.filamentvision.backend.simulator.fixtures.*
+import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.runtime.*
+import com.filamentvision.core.config.VisionConfiguration
+import com.filamentvision.core.frame.CameraFrame
+import com.filamentvision.core.vision.*
+import java.net.DatagramSocket
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -29,6 +35,48 @@ class ReviewRegressionTest {
     // runtime, simulator, persistence, event hub and facade remain the actual composition.
     private fun field(owner: Any, name: String) = owner.javaClass.getDeclaredField(name).also { it.isAccessible = true }
     private fun replay(c: BackendComposition) = (c.events.replayAfter(device, 0) as EventReplay.Available).events
+
+    @Test fun realUdpStopDuringVisionCannotAdmitTheOldGenerationAndRestartReleasesPermit() = runBlocking {
+        val c = BackendComposition.open(temporary.root.toPath().resolve("udp-vision-stop.db"),
+            temporary.root.toPath().resolve("udp-vision-stop-objects"))
+        val source = c.inputSource as RaspberryPiUdpInputSource
+        val entered = CompletableDeferred<Unit>()
+        val release = CountDownLatch(1)
+        val processor = field(c.runtime, "processor")
+        val original = processor.get(c.runtime) as VisionAnalyzer
+        val port = DatagramSocket(0).use { it.localPort }
+        try {
+            val service = checkNotNull(c.udpInputService)
+            val saved = service.save(1, RaspberryPiUdpInputProfile.defaults().copy(enabled = true,
+                listenPort = port, payload = ImagePayloadProfile.Gray8(48, 8)))
+            service.apply(saved.revision)
+            processor.set(c.runtime, object : VisionAnalyzer {
+                override fun process(frame: CameraFrame, configuration: VisionConfiguration, decodeNanos: Long): VisionResult {
+                    val result = original.process(frame, configuration, decodeNanos)
+                    entered.complete(Unit)
+                    check(release.await(10, TimeUnit.SECONDS))
+                    return result
+                }
+            })
+            c.application.start(device, "start", null, null)
+            UdpTestSender().use { sender ->
+                val pixels = ByteArray(384) { if (it % 48 in 6 until 41) 20 else 200.toByte() }
+                sender.sendStructured(port, 1u, pixels, 128)
+                withTimeout(5000) { entered.await() }
+                val stop = async { c.application.stop(device, "stop") }
+                withTimeout(5000) { while (source.activeProducerCount != 0) delay(1) }
+                release.countDown(); withTimeout(5000) { stop.await() }
+                assertEquals(0L, c.runtime.state.value.statistics.sampleCount)
+                assertTrue(replay(c).none { it.event is DomainEvent.Measurement })
+                processor.set(c.runtime, original)
+                c.application.start(device, "restart", null, null)
+                sender.sendStructured(port, 2u, pixels, 128)
+                withTimeout(5000) { while (c.runtime.state.value.statistics.sampleCount != 1L) delay(1) }
+                assertEquals(0L, source.udpDiagnostics().processingBackpressureDrops)
+                assertEquals(1, source.activeProducerCount); assertEquals(1, source.activeReceiverCount)
+            }
+        } finally { release.countDown(); c.close() }
+    }
 
     @Test fun snapshotDoesNotExposeRuntimeAdvanceBeforeItsStatePublication() = runTest {
         val d = StandardTestDispatcher(testScheduler)
