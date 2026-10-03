@@ -151,8 +151,8 @@ export class MonitoringStore {
   }
 
   stop(): void | Promise<void> {
-    this.unobserve()
     if (this.source.unobserve) return this.source.stop()
+    this.unobserve()
   }
 
   unobserve(): void {

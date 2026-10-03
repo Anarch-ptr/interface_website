@@ -13,11 +13,13 @@ class Socket {
   onmessage: ((event: { data: unknown }) => void) | null = null
   onclose: (() => void) | null = null
   onerror: (() => void) | null = null
+  onopen: (() => void) | null = null
   closed = false
   constructor(url: string) { this.url = url; Socket.all.push(this) }
   close() { this.closed = true }
   message(data: unknown) { this.onmessage?.({ data: typeof data === 'object' && !(data instanceof ArrayBuffer) ? JSON.stringify(data) : data }) }
   disconnect() { this.onclose?.() }
+  open() { this.onopen?.() }
 }
 
 const measurement = { evidence: [{ cameraId: 'camera', timestamp: 1000, sequence: 1,
@@ -337,5 +339,131 @@ describe('BackendFilamentDataSource', () => {
     await Promise.all([stopping, repeated])
     expect(vi.mocked(fetch).mock.calls).toHaveLength(2)
     source.dispose()
+  })
+
+  it.each([['start', 'stop', 'start'], ['stop', 'start', 'stop']] as const)(
+    'preserves the final intent of %s-%s-%s before any response', async (first, middle, last) => {
+      let completeFirst!: (response: Response) => void
+      const actions: string[] = []
+      vi.mocked(fetch).mockImplementation(async (url) => {
+        const action = String(url).split('/').at(-1)!
+        actions.push(action)
+        const response = Response.json({ correlationId: 'test', data: {
+          outcome: action === 'start' ? 'STARTED' : 'STOPPED', session: null,
+        } })
+        if (actions.length === 1) return new Promise(resolve => { completeFirst = resolve })
+        return response
+      })
+      const source = new BackendFilamentDataSource()
+      const issue = (action: 'start' | 'stop') => action === 'start' ? source.start(configuration) : source.stop()
+      const commands = [issue(first), issue(middle), issue(last)]
+      await flush()
+      completeFirst(Response.json({ correlationId: 'test', data: { outcome: first === 'start' ? 'STARTED' : 'STOPPED', session: null } }))
+      await Promise.all(commands)
+      expect(actions).toEqual([first, middle, last])
+      const ids = vi.mocked(fetch).mock.calls.map(([, options]) => JSON.parse(options!.body as string).commandId)
+      expect(new Set(ids).size).toBe(3)
+      source.dispose()
+    },
+  )
+
+  it.each([['start', 'COMPLETED'], ['stop', 'RUNNING']] as const)(
+    'invalidates a completed %s command after contrary state.changed %s', async (action, monitoring) => {
+      vi.mocked(fetch).mockImplementation(async (url) => Response.json({ correlationId: 'test', data:
+        String(url).endsWith('/state') ? state() : { outcome: action === 'start' ? 'STARTED' : 'STOPPED', session: null } }))
+      const source = new BackendFilamentDataSource()
+      const issue = () => action === 'start' ? source.start(configuration) : source.stop()
+      source.observe(configuration); await flush()
+      await issue(); await issue()
+      expect(vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1)
+      events().message(event(5, 'state.changed', { monitoring, session: monitoring === 'RUNNING' ? state().session : null, activeProducerCount: monitoring === 'RUNNING' ? 1 : 0 }))
+      await issue()
+      const requests = vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')
+      expect(requests).toHaveLength(2)
+      expect(JSON.parse(requests[0][1]!.body as string).commandId).not.toBe(JSON.parse(requests[1][1]!.body as string).commandId)
+      source.dispose()
+    },
+  )
+
+  it('invalidates completed commands after an authoritative REST observation refresh', async () => {
+    let monitoring = 'RUNNING'
+    vi.mocked(fetch).mockImplementation(async (url) => Response.json({ correlationId: 'test', data:
+      String(url).endsWith('/state') ? { ...state(), monitoring } : { outcome: 'STARTED', session: null } }))
+    const source = new BackendFilamentDataSource()
+    source.observe(configuration); await flush()
+    await source.start(configuration)
+    source.unobserve(); monitoring = 'COMPLETED'
+    source.observe(configuration); await flush()
+    await source.start(configuration)
+    expect(vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(2)
+    source.dispose()
+  })
+
+  it('restores health on a quiet reliable reconnect by refreshing authoritative state without advancing the cursor', async () => {
+    const source = new BackendFilamentDataSource()
+    const snapshots: unknown[] = []
+    source.subscribeBackendState(value => snapshots.push(value))
+    source.observe(configuration); await flush()
+    events().disconnect()
+    expect(source.state).toBe(VisionSourceState.ERROR)
+    vi.advanceTimersByTime(1000); events().open(); await flush()
+    expect(source.state).toBe(VisionSourceState.LIVE)
+    expect(snapshots).toHaveLength(2)
+    expect(events().url).toContain('afterSequence=4')
+    events().disconnect()
+    vi.advanceTimersByTime(1000); events().open(); await flush()
+    expect(events().url).toContain('afterSequence=4')
+    source.dispose()
+  })
+
+  it('keeps cursor and error state if a quiet reconnect REST checkpoint is ahead of replay', async () => {
+    const source = new BackendFilamentDataSource()
+    source.observe(configuration); await flush()
+    events().disconnect()
+    vi.mocked(fetch).mockImplementation(async () => Response.json({ correlationId: 'test', data: state(9) }))
+    vi.advanceTimersByTime(1000); events().open(); await flush()
+    expect(source.state).toBe(VisionSourceState.ERROR)
+    events().disconnect(); vi.advanceTimersByTime(1000)
+    expect(events().url).toContain('afterSequence=4')
+    source.dispose()
+  })
+
+  it('keeps Backend Store observation live before and after stop acknowledgement until runtime release', async () => {
+    let completeStop!: (response: Response) => void
+    vi.mocked(fetch).mockImplementation(async (url) => String(url).endsWith('/monitoring/stop') ?
+      new Promise<Response>(resolve => { completeStop = resolve }) : Response.json({ correlationId: 'test', data: state() }))
+    const source = new BackendFilamentDataSource()
+    const store = new MonitoringStore(source, new LocalConfigurationStorage(window.localStorage))
+    const runtime = new MonitoringRuntime(store)
+    const release = runtime.acquire(); await flush()
+    const stopped = store.stop(); await flush()
+    expect(store.getLiveSnapshot().monitoringState).toBe('MONITORING')
+    expect(store.diagnostics.sourceSubscriptionActive).toBe(true)
+    expect(Socket.all.some(socket => socket.closed)).toBe(false)
+    completeStop(Response.json({ correlationId: 'test', data: { outcome: 'STOPPED', session: null } }))
+    await stopped
+    expect(store.getLiveSnapshot().monitoringState).toBe('MONITORING')
+    expect(Socket.all.some(socket => socket.closed)).toBe(false)
+    events().message(event(5, 'state.changed', { monitoring: 'COMPLETED', session: null, activeProducerCount: 0 }))
+    expect(store.getLiveSnapshot().monitoringState).toBe('IDLE')
+    expect(store.diagnostics.sourceSubscriptionActive).toBe(true)
+    release(); await flush(); runtime.dispose()
+    expect(Socket.all.every(socket => socket.closed)).toBe(true)
+  })
+
+  it('retains authoritative running state and observers when an explicit Backend stop fails', async () => {
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (String(url).endsWith('/monitoring/stop')) throw new Error('stop rejected')
+      return Response.json({ correlationId: 'test', data: state() })
+    })
+    const source = new BackendFilamentDataSource()
+    const store = new MonitoringStore(source, new LocalConfigurationStorage(window.localStorage))
+    const runtime = new MonitoringRuntime(store)
+    const release = runtime.acquire(); await flush()
+    await expect(store.stop()).rejects.toThrow('stop rejected')
+    expect(store.getLiveSnapshot().monitoringState).toBe('MONITORING')
+    expect(store.diagnostics.sourceSubscriptionActive).toBe(true)
+    expect(Socket.all.some(socket => socket.closed)).toBe(false)
+    release(); await flush(); runtime.dispose()
   })
 })

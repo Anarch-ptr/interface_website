@@ -4,6 +4,7 @@ import type { FilamentDataSource, ReadingListener, SourceStateListener } from '.
 
 type Listener<T> = (value: T) => void
 type PreviewMetadata = Omit<CameraPreview, 'url'> & { byteLength: number; mediaType: string }
+type MonitoringCommand = { action: string; id: string; promise: Promise<void> | null; done: boolean }
 
 /** Browser observers never own the Backend producer. Only explicit REST commands do. */
 export class BackendFilamentDataSource implements FilamentDataSource {
@@ -23,12 +24,13 @@ export class BackendFilamentDataSource implements FilamentDataSource {
   private backendMonitoring = 'IDLE'
   private observerAbort: AbortController | null = null
   private eventSocket: WebSocket | null = null
+  private eventRefreshAbort: AbortController | null = null
   private previewSocket: WebSocket | null = null
   private eventRetry: ReturnType<typeof setTimeout> | null = null
   private previewRetry: ReturnType<typeof setTimeout> | null = null
   private previewMetadata: PreviewMetadata | null = null
   private preview: CameraPreview | null = null
-  private readonly commands = new Map<string, { id: string; promise: Promise<void> | null; done: boolean }>()
+  private lastCommand: MonitoringCommand | null = null
   private readonly commandAborts = new Set<AbortController>()
   private commandTail: Promise<void> = Promise.resolve()
 
@@ -103,10 +105,11 @@ export class BackendFilamentDataSource implements FilamentDataSource {
       this.applyState(state.monitoring); this.openEvents(generation)
     } catch { if (this.current(generation)) this.retryEvents(generation) }
   }
-  private openEvents(generation: number) {
+  private openEvents(generation: number, refresh = false) {
     if (!this.current(generation) || this.eventSocket) return
     const socket = new WebSocket(this.ws(`events?deviceId=${encodeURIComponent(this.deviceId)}&afterSequence=${this.cursor}`))
     this.eventSocket = socket
+    socket.onopen = () => { if (refresh && this.eventSocket === socket) void this.refreshEventState(socket, generation) }
     socket.onmessage = ({ data }) => {
       if (this.eventSocket !== socket || !this.current(generation)) return
       try {
@@ -135,7 +138,7 @@ export class BackendFilamentDataSource implements FilamentDataSource {
           this.applyState(event.payload.monitoring)
         }
         publish(this.eventListeners, event)
-        this.applyState(this.backendMonitoring)
+        this.applyState(this.backendMonitoring, false)
         // Advance only after every consumer successfully processes the event.
         this.cursor = event.sequence
       } catch { this.retryEvents(generation) }
@@ -148,8 +151,24 @@ export class BackendFilamentDataSource implements FilamentDataSource {
     this.eventRetry = setTimeout(() => {
       this.eventRetry = null
       if (this.cursor === null) void this.bootstrap(generation)
-      else this.openEvents(generation)
+      else this.openEvents(generation, true)
     }, 1000)
+  }
+  private async refreshEventState(socket: WebSocket, generation: number) {
+    const abort = new AbortController()
+    this.eventRefreshAbort = abort
+    try {
+      const state = await this.read<BackendState>(`${this.device()}/state`, abort.signal)
+      if (!this.current(generation) || this.eventSocket !== socket) return
+      this.validateState(state)
+      // A REST refresh may restore quiet transport health only at our delivered
+      // checkpoint. It cannot acknowledge events that replay has not delivered.
+      if (state.eventSequence === this.cursor) {
+        publish(this.backendListeners, state); this.applyState(state.monitoring)
+      }
+    } catch {
+      if (!abort.signal.aborted && this.current(generation) && this.eventSocket === socket) this.retryEvents(generation)
+    } finally { if (this.eventRefreshAbort === abort) this.eventRefreshAbort = null }
   }
   private async recoverRestart(generation: number) {
     try {
@@ -212,13 +231,21 @@ export class BackendFilamentDataSource implements FilamentDataSource {
       typeof state.connection !== 'string' || !(state.session === null || record(state.session) && typeof state.session.id === 'string') ||
       !(state.latestMeasurement === null || measurement(state.latestMeasurement))) throw new Error('Invalid Backend state.')
   }
-  private applyState(monitoring: string) {
+  private applyState(monitoring: string, authoritative = true) {
+    const running = monitoring === 'RUNNING' || monitoring === 'STARTING'
+    if (authoritative && this.lastCommand?.done && (this.lastCommand.action === 'start') !== running) {
+      this.lastCommand = null
+    }
     this.backendMonitoring = monitoring
     this.setState(monitoring === 'RUNNING' ? VisionSourceState.LIVE : monitoring === 'STARTING' ? VisionSourceState.STARTING :
       monitoring === 'INTERRUPTED' ? VisionSourceState.ERROR : VisionSourceState.STOPPED)
   }
   private setState(state: VisionSourceState) { this.mutableState = state; publish(this.stateListeners, state) }
-  private closeEventSocket() { if (this.eventSocket) close(this.eventSocket); this.eventSocket = null }
+  private closeEventSocket() {
+    this.eventRefreshAbort?.abort(); this.eventRefreshAbort = null
+    if (this.eventSocket) close(this.eventSocket)
+    this.eventSocket = null
+  }
   private closeEvents() {
     if (this.eventRetry !== null) clearTimeout(this.eventRetry)
     this.eventRetry = null; this.closeEventSocket()
@@ -269,11 +296,13 @@ export class BackendFilamentDataSource implements FilamentDataSource {
   }
   private command(action: string, body: object): Promise<void> {
     if (this.disposed) return Promise.reject(new Error('Data source disposed.'))
-    const existing = this.commands.get(action)
+    // Only consecutive equivalent intents may coalesce. An intervening opposite
+    // intent must preserve a new command in the serialized Backend order.
+    const existing = this.lastCommand?.action === action ? this.lastCommand : null
     if (existing?.promise) return existing.promise
     if (existing?.done) return Promise.resolve()
-    const command = existing ?? { id: crypto.randomUUID(), promise: null, done: false }
-    this.commands.set(action, command)
+    const command: MonitoringCommand = existing ?? { action, id: crypto.randomUUID(), promise: null, done: false }
+    this.lastCommand = command
     const abort = new AbortController(); this.commandAborts.add(abort)
     command.promise = this.commandTail.catch(() => {}).then(async () => {
       abort.signal.throwIfAborted()
@@ -283,8 +312,6 @@ export class BackendFilamentDataSource implements FilamentDataSource {
         throw new Error('Invalid Backend command result.')
       }
       command.done = true
-      const opposite = action === 'start' ? 'stop' : 'start'
-      if (!this.commands.get(opposite)?.promise) this.commands.delete(opposite)
     }).finally(() => { command.promise = null; this.commandAborts.delete(abort) })
     this.commandTail = command.promise
     return command.promise
@@ -300,7 +327,7 @@ function publishLossy<T>(listeners: Set<Listener<T>>, value: T) {
     try { listener(value) } catch { /* A lossy observer cannot prevent socket/URL cleanup. */ }
   }
 }
-function close(socket: WebSocket) { socket.onmessage = null; socket.onclose = null; socket.onerror = null; socket.close() }
+function close(socket: WebSocket) { socket.onopen = null; socket.onmessage = null; socket.onclose = null; socket.onerror = null; socket.close() }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value) }
 function sequence(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0 }
 function measurementRecord(value: unknown): value is BackendMeasurementRecord {
