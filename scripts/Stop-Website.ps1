@@ -47,8 +47,9 @@ foreach ($target in $targets) {
         continue
     }
 
-    & taskkill.exe /PID $savedPid /T /F | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    & $env:ComSpec /d /c "taskkill.exe /PID $savedPid /T /F >nul 2>&1"
+    $taskkillExit = $LASTEXITCODE
+    if ($taskkillExit -ne 0) {
         Write-Warning "Could not stop the $($target.Name) process tree rooted at PID $savedPid."
         Write-StopLog "$($target.Name) stop failed pid=$savedPid"
         $failed = $true

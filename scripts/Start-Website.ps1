@@ -127,9 +127,13 @@ function Wait-ForHttp {
 function Stop-StartedTree($Process, [string] $PidFile, [string] $Name) {
     if ($null -eq $Process) { return }
     $pidValue = Get-LauncherPid $Process
-    & taskkill.exe /PID $pidValue /T /F 2>$null | Out-Null
+    $exitCode = 0
+    if (Test-ProcessAlive $Process) {
+        & $env:ComSpec /d /c "taskkill.exe /PID $pidValue /T /F >nul 2>&1"
+        $exitCode = $LASTEXITCODE
+    }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-    Write-LauncherLog "cleanup $Name pid=$pidValue exit=$LASTEXITCODE"
+    Write-LauncherLog "cleanup $Name pid=$pidValue exit=$exitCode"
 }
 
 $mutex = [System.Threading.Mutex]::new($false, 'Local\FilamentVision.WebsiteLauncher')

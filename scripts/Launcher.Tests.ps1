@@ -41,6 +41,8 @@ Assert-Contains $start 'call `"$ScriptPath`" `"$LogPath`"' 'CMD /c must use call
 Assert-Contains $startBat '-NoProfile' 'Start wrapper must not load the user PowerShell profile.'
 Assert-Contains $stopBat '-NoProfile' 'Stop wrapper must not load the user PowerShell profile.'
 Assert-NotContains "$start`n$stop" 'taskkill.exe /IM' 'Stop logic must never kill Java or Node by image name.'
+Assert-Contains $start 'taskkill.exe /PID $pidValue /T /F' 'Startup cleanup must target only its owned process tree.'
+Assert-Contains $stop 'taskkill.exe /PID $savedPid /T /F' 'Stop must target only a verified owned process tree.'
 
 $dialogCount = ([regex]::Matches($vbs, '(?im)^\s*MsgBox\b')).Count
 if ($dialogCount -ne 1) { throw "Only the outer VBS may show a GUI error dialog; found $dialogCount MsgBox calls." }
