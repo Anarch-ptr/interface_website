@@ -27,6 +27,8 @@ data class EffectiveUdpNetworkPlan(
     val appliedAtEpochMillis: Long?,
     val resolutionGeneration: Long,
 ) {
+    internal fun immutableCopy() = copy(resolvedSourceIpv4s = immutableIpv4Set(resolvedSourceIpv4s))
+
     fun applied(appliedAt: Long, generation: Long) = copy(
         resolvedSourceIpv4s = immutableIpv4Set(resolvedSourceIpv4s),
         appliedAtEpochMillis = appliedAt,

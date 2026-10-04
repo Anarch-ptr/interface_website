@@ -7,6 +7,7 @@ import com.filamentvision.core.runtime.*
 import com.filamentvision.core.session.SessionStatistics
 import com.filamentvision.core.vision.CameraMeasurementSource
 import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.network.ResolutionStatus
 import com.filamentvision.backend.input.runtime.*
 import kotlinx.coroutines.runBlocking
 import java.sql.DriverManager
@@ -217,7 +218,7 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
                 assertEquals(RaspberryPiUdpInputProfile.defaults(), SqliteRaspberryPiUdpInputProfileRepository(upgraded).state().applied.profile)
                 upgraded.access { connection ->
                     assertEquals(originalRows, legacyRows(connection, originalRows.mapValues { it.value.first }))
-                    assertEquals(4L, scalar(connection, "PRAGMA user_version"))
+                    assertEquals(5L, scalar(connection, "PRAGMA user_version"))
                     assertEquals(3L, scalar(connection, "SELECT COUNT(*) FROM measurements"))
                     assertEquals(0L, scalar(connection, "SELECT COUNT(*) FROM measurements_v2"))
                     connection.createStatement().use { statement -> statement.executeQuery("SELECT payload FROM configuration_revisions WHERE revision=1").use { row -> row.next(); assertArrayEquals(bytes, row.getBytes(1)) } }
@@ -277,19 +278,54 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
         assertEquals(initial, router.receiverEffectiveProfiles)
     }
 
-    @Test fun freshVersionFourSeedsDisabledProfileExactlyOnce() = runBlocking {
+    @Test fun freshVersionFiveSeedsDisabledProfileExactlyOnce() = runBlocking {
         val state = SqliteRaspberryPiUdpInputProfileRepository(database).state()
         assertEquals(1L, state.saved.revision)
         assertEquals(state.saved, state.applied)
         assertEquals(RaspberryPiUdpInputProfile.defaults(), state.saved.profile)
         database.access { c ->
-            assertEquals(4L, scalar(c, "PRAGMA user_version"))
+            assertEquals(5L, scalar(c, "PRAGMA user_version"))
             assertEquals(0L, scalar(c, "SELECT COUNT(*) FROM udp_input_revisions"))
         }
         database.close()
         database = SqliteDatabase(temporary.root.toPath().resolve("test.db"))
         assertEquals(state, SqliteRaspberryPiUdpInputProfileRepository(database).state())
         database.access { assertEquals(1L, scalar(it, "SELECT COUNT(*) FROM raspberry_pi_udp_input_revisions")) }
+    }
+
+    @Test fun versionFourToFiveMigrationPersistsInactivePlanButMarksEnabledLegacyForReapply() {
+        listOf(false, true).forEach { enabled ->
+            val path = temporary.root.toPath().resolve("legacy-v4-$enabled.db")
+            createLegacyDatabase(path, 4) { connection ->
+                val profile = RaspberryPiUdpInputProfile.defaults().copy(enabled = enabled)
+                connection.prepareStatement("INSERT INTO raspberry_pi_udp_input_revisions(payload) VALUES (?)").use {
+                    it.setBytes(1, RaspberryPiUdpInputProfileCodec.encode(profile)); it.executeUpdate()
+                }
+                connection.createStatement().use {
+                    it.execute("INSERT INTO raspberry_pi_udp_input_state(singleton,saved_revision,applied_revision) VALUES (1,1,1)")
+                }
+            }
+            SqliteDatabase(path).use { migrated ->
+                migrated.access { connection ->
+                    assertEquals(5L, scalar(connection, "PRAGMA user_version"))
+                    assertEquals(0L, scalar(connection, "SELECT resolution_generation FROM raspberry_pi_udp_input_state"))
+                    connection.createStatement().use { statement ->
+                        statement.executeQuery("SELECT applied_network_plan FROM raspberry_pi_udp_input_state").use { row ->
+                            assertTrue(row.next())
+                            val bytes = row.getBytes(1)
+                            if (enabled) {
+                                assertNull(bytes)
+                            } else {
+                                val plan = EffectiveUdpNetworkPlanCodec.decode(bytes)
+                                assertEquals(ResolutionStatus.NOT_REQUIRED, plan.destinationStatus)
+                                assertEquals(ResolutionStatus.NOT_REQUIRED, plan.sourceStatus)
+                                assertEquals(0L, plan.resolutionGeneration)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @Test fun migrationCarriesLatestCompatibleCameraAWithoutChangingOldProfiles() = runBlocking {
@@ -372,7 +408,7 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
                 ImagePayloadProfile.Gray8(640, 480), DatagramEnvelopeProfile("AB CD", "12 EF"),
                 TransportLimits(2, 3_000_000, 1200, 3000, 1300)), state.saved.profile)
             db.access { c ->
-                assertEquals(4L, scalar(c, "PRAGMA user_version"))
+                assertEquals(5L, scalar(c, "PRAGMA user_version"))
                 assertEquals(originalRows, legacyRows(c, originalRows.mapValues { it.value.first }))
                 assertEquals(1L, scalar(c, "SELECT COUNT(*) FROM udp_input_revisions"))
                 assertEquals(1L, scalar(c, "SELECT applied_revision FROM udp_input_state"))
@@ -521,7 +557,12 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
 
     private fun createLegacyDatabase(path: Path, version: Int, seed: (Connection) -> Unit) {
         DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
-            val resources = listOf("V001__phase2_foundation.sql", "V002__snapshot_source_sequence.sql", "V003__udp_input_profiles_and_measurement_source.sql")
+            val resources = listOf(
+                "V001__phase2_foundation.sql",
+                "V002__snapshot_source_sequence.sql",
+                "V003__udp_input_profiles_and_measurement_source.sql",
+                "V004__single_camera_udp_and_measurements.sql",
+            )
             resources.take(version).forEach { name ->
                 val sql = checkNotNull(javaClass.getResourceAsStream("/db/migration/$name")).bufferedReader().use { it.readText() }
                 c.createStatement().use { s -> sql.split(';').filter(String::isNotBlank).forEach(s::execute) }

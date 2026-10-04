@@ -7,6 +7,7 @@ import java.sql.SQLException
 import com.filamentvision.core.repository.RepositoryException
 import com.filamentvision.core.repository.RepositoryFailure
 import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan
 
 /** Connections are scoped to an operation. Close prevents further operations and waits for
  * any in-flight operation; migration and multi-row writes use explicit transactions.
@@ -25,7 +26,7 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
                     migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
                     statement.execute("PRAGMA user_version = 1")
                 }
-            } else if (version !in 1..4) throw RepositoryException(RepositoryFailure.STORAGE, "Unsupported schema version")
+            } else if (version !in 1..5) throw RepositoryException(RepositoryFailure.STORAGE, "Unsupported schema version")
             if (version < 2) {
                 val migration = checkNotNull(javaClass.getResourceAsStream("/db/migration/V002__snapshot_source_sequence.sql"))
                     .bufferedReader().use { it.readText() }
@@ -50,6 +51,38 @@ class SqliteDatabase(private val path: Path) : AutoCloseable {
                 }
                 seedSingleCameraProfile(connection)
                 connection.createStatement().use { it.execute("PRAGMA user_version = 4") }
+            }
+            if (version < 5) {
+                val migration = checkNotNull(javaClass.getResourceAsStream("/db/migration/V005__effective_udp_network_plan.sql"))
+                    .bufferedReader().use { it.readText() }
+                connection.createStatement().use { statement ->
+                    migration.split(';').filter { it.isNotBlank() }.forEach { statement.execute(it) }
+                }
+                seedEffectiveNetworkPlan(connection)
+                connection.createStatement().use { it.execute("PRAGMA user_version = 5") }
+            }
+        }
+    }
+
+    /** V005 never resolves DNS or enumerates interfaces. Enabled legacy profiles require explicit Re-Apply. */
+    private fun seedEffectiveNetworkPlan(connection: Connection) {
+        val profile = connection.createStatement().use { statement ->
+            statement.executeQuery(
+                """SELECT revision.payload FROM raspberry_pi_udp_input_state state
+                    JOIN raspberry_pi_udp_input_revisions revision ON revision.revision = state.applied_revision
+                    WHERE state.singleton = 1""".trimIndent(),
+            ).use { row ->
+                require(row.next()) { "Missing applied Raspberry Pi UDP input profile" }
+                RaspberryPiUdpInputProfileCodec.decode(row.getBytes(1))
+            }
+        }
+        if (!profile.enabled) {
+            val payload = EffectiveUdpNetworkPlanCodec.encode(EffectiveUdpNetworkPlan.inactive(createdAtEpochMillis = 0))
+            connection.prepareStatement(
+                "UPDATE raspberry_pi_udp_input_state SET applied_network_plan=?, resolution_generation=0 WHERE singleton=1",
+            ).use { statement ->
+                statement.setBytes(1, payload)
+                check(statement.executeUpdate() == 1)
             }
         }
     }
