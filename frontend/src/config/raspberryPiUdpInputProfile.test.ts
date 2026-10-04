@@ -5,7 +5,7 @@ import type { ImagePayload, RaspberryPiUdpInputProfile } from '../domain/raspber
 describe('Raspberry Pi expected-input profile', () => {
   it('starts disabled with the backend JPEG defaults and only one input', () => {
     expect(defaultRaspberryPiUdpInputProfile()).toEqual({
-      enabled: false, networkInterface: { mode: 'AUTO' }, listenPort: 5000, raspberryPiIpv4: null,
+      enabled: false, network: { bind: { mode: 'AUTO' }, destination: { mode: 'AUTO' }, sourceFilter: { mode: 'ANY' }, listenPort: 5000 },
       payload: { format: 'JPEG', maxFrameBytes: 16777216 }, envelope: { headerHex: 'AA 01', footerHex: '0D 0A' },
       transportLimits: { maxInFlightFrames: 2, maxFrameBytes: 33554432, frameTimeoutMs: 1000, maxChunkCount: 32768, maxChunkPayloadBytes: 1400 },
     })
@@ -33,26 +33,28 @@ describe('Raspberry Pi expected-input profile', () => {
     expect(validateRaspberryPiUdpInputProfile(profile).map((error) => error.path)).toEqual(['envelope.headerHex', 'envelope.footerHex'])
   })
 
-  it.each(['::1', 'host', '192.168.001.2', '256.0.0.1', '1.2.3.4 ', '1.2.3'])('rejects a noncanonical IPv4: %j', (ipv4) => {
+  it.each(['::1', 'bad host', '192.168.001.2', '256.0.0.1', '1.2.3.4 ', '1.2.3'])('rejects malformed network values: %j', (ipv4) => {
     const profile = defaultRaspberryPiUdpInputProfile()
-    profile.raspberryPiIpv4 = ipv4
-    profile.networkInterface = { mode: 'SPECIFIC', interfaceId: '', ipv4 }
+    profile.network.sourceFilter = { mode: 'IP_OR_HOST', hostOrIpv4: ipv4 }
+    profile.network.bind = { mode: 'SPECIFIC_INTERFACE', interfaceId: '', ipv4 }
     expect(validateRaspberryPiUdpInputProfile(profile).map((error) => error.path)).toEqual([
-      'networkInterface.interfaceId', 'networkInterface.ipv4', 'raspberryPiIpv4',
+      'network.bind.interfaceId', 'network.bind.ipv4', 'network.sourceFilter.hostOrIpv4',
     ])
   })
 
   it('accepts canonical IPv4 and unsigned wire-capacity transport bounds', () => {
     const profile = defaultRaspberryPiUdpInputProfile()
-    profile.raspberryPiIpv4 = '192.168.1.2'
-    profile.networkInterface = { mode: 'SPECIFIC', interfaceId: 'wifi', ipv4: '192.168.1.3' }
-    profile.listenPort = 65535
+    profile.network.sourceFilter = { mode: 'IP_OR_HOST', hostOrIpv4: 'filament-pi.local' }
+    profile.network.destination = { mode: 'MANUAL', hostOrIpv4: 'backend.local' }
+    profile.network.bind = { mode: 'SPECIFIC_INTERFACE', interfaceId: 'wifi', ipv4: '192.168.1.3' }
+    profile.network.listenPort = 65535
     profile.transportLimits = { maxInFlightFrames: 32, maxFrameBytes: 33554432, frameTimeoutMs: 10000, maxChunkCount: 65535, maxChunkPayloadBytes: 60000 }
     expect(validateRaspberryPiUdpInputProfile(profile)).toEqual([])
   })
 
   it.each([0, 65536, 1.5, NaN, Infinity])('rejects invalid ports %s', (listenPort) => {
-    expect(validateRaspberryPiUdpInputProfile({ ...defaultRaspberryPiUdpInputProfile(), listenPort }).map((error) => error.path)).toEqual(['listenPort'])
+    const profile = defaultRaspberryPiUdpInputProfile(); profile.network.listenPort = listenPort
+    expect(validateRaspberryPiUdpInputProfile(profile).map((error) => error.path)).toEqual(['network.listenPort'])
   })
 
   it('rejects fractional, nonfinite and out-of-range transport fields', () => {

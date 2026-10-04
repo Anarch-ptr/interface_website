@@ -8,10 +8,11 @@ const response = (data: unknown, status = 200, headers?: HeadersInit) =>
 
 const profile = () => defaultRaspberryPiUdpInputProfile()
 const state = (): UdpConfigurationState => ({ savedRevision: 2, appliedRevision: 1, configuration: profile(),
-  appliedConfiguration: { ...profile(), listenPort: 5001 }, outcome: null, protocolVersion: 1, transportMode: 'STRUCTURED_CHUNKED' })
+  appliedConfiguration: { ...profile(), network: { ...profile().network, listenPort: 5001 } },
+  resolutionGeneration: 0, appliedEffectiveNetworkPlan: null, networkConsistencyStatus: 'HEALTHY',
+  reapplyRequired: false, lastApplyError: null, outcome: null, protocolVersion: 1, transportMode: 'STRUCTURED_CHUNKED' })
 const interfaces: NetworkInterfaces = {
   interfaces: [{ id: 'wifi', displayName: 'Wi-Fi', ipv4: '192.168.1.3', isUp: true, isLoopback: false, isVirtual: false, supportsMulticast: true }],
-  selection: { mode: 'AUTO' }, advertisedBackendIpv4: '192.168.1.3', listenPort: 5000, hasMultipleCandidates: false, statusDetail: null,
 }
 const diagnostics: UdpDiagnostics = {
   status: 'SOURCE_IP_MISMATCH', statusDetail: null, datagramsReceived: 3, bytesReceived: 90, framesStarted: null, framesCompleted: 0,
@@ -19,7 +20,7 @@ const diagnostics: UdpDiagnostics = {
   invalidTransportHeaders: 0, oversizedFrames: 0, invalidHeaderCount: 1, invalidFooterCount: 2, invalidPayloadSizeCount: 0,
   decodeFailures: 0, sourceFilteredDatagrams: 3, oversizedOrTruncatedDatagrams: 0, lastPacketMonotonicNanos: 123,
   lastValidFrameMonotonicNanos: null, lastPacketSourceIpv4: '192.168.1.4', lastPacketSourcePort: 6000, lastPacketEpochMillis: 456,
-  preAdmissionDroppedInputs: 0, processingBackpressureDrops: 0,
+  preAdmissionDroppedInputs: 0, processingBackpressureDrops: 0, appliedNetwork: null,
 }
 const snapshot: InspectorSnapshot = {
   sequence: 7,
@@ -27,7 +28,7 @@ const snapshot: InspectorSnapshot = {
     receivedAtMonotonicNanos: 123, status: 'VALID', headerHex: 'AA 01', footerHex: '0D 0A',
     expectedHeaderHex: 'AA 01', expectedFooterHex: '0D 0A', headerMatched: true, footerMatched: true, hexPreview: 'AA 01',
     transport: { protocolVersion: 1, compatibilityStreamId: 1, frameId: '18446744073709551615', chunkIndex: 0, chunkCount: 1,
-      sourceTimestampMicros: 456, payloadLength: 2, framePayloadBytes: 2, status: 'VALID', hexPreview: '01 02' } },
+      sourceTimestampMicros: 456, payloadLength: 2, framePayloadBytes: 2, status: 'VALID', hexPreview: '01 02' }, appliedNetwork: null },
   parsedFrame: { payloadFormat: 'GRAY8', decodeResult: 'VALID', width: 2, height: 1, completedFrameBytes: 2,
     receivedAtMonotonicNanos: 123, hexPreview: '01 02' },
 }
@@ -42,7 +43,7 @@ describe('BackendApiClient single-stream contracts', () => {
     const signal = new AbortController().signal
     expect(await api.getRaspberryPiUdpConfiguration('pi/device', signal)).toEqual(state())
     expect(await api.saveRaspberryPiUdpConfiguration('pi/device', profile(), 2, signal)).toEqual(state())
-    expect(await api.applyRaspberryPiUdpConfiguration('pi/device', 2, 2, signal)).toEqual(state())
+    expect(await api.applyRaspberryPiUdpConfiguration('pi/device', 2, 2, 1, 0, false, signal)).toEqual(state())
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([
       '/api/v1/devices/pi%2Fdevice/udp-input-configuration', '/api/v1/devices/pi%2Fdevice/udp-input-configuration',
       '/api/v1/devices/pi%2Fdevice/udp-input-configuration/apply',
@@ -50,7 +51,8 @@ describe('BackendApiClient single-stream contracts', () => {
     expect(fetch.mock.calls[1][1]).toEqual({ method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commandId: 'cmd-20', expectedSavedRevision: 2, configuration: profile() }), signal })
     expect(fetch.mock.calls[2][1]).toEqual({ method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ commandId: 'cmd-20', revision: 2, expectedSavedRevision: 2 }), signal })
+      body: JSON.stringify({ commandId: 'cmd-20', revision: 2, expectedSavedRevision: 2,
+        expectedAppliedRevision: 1, expectedResolutionGeneration: 0, forceReapply: false }), signal })
     expect(fetch.mock.calls[0][1].signal).toBe(signal)
   })
 
@@ -64,9 +66,25 @@ describe('BackendApiClient single-stream contracts', () => {
     expect(fetch.mock.calls).toEqual([['/api/v1/network-interfaces', { signal }], ['/api/v1/devices/pi/udp-diagnostics', { signal }]])
   })
 
+  it('previews without mutation and sends same-revision forced reapply CAS identity', async () => {
+    const preview = { configuredDestination: null, configuredSource: null, candidatePlan: null,
+      destinationStatus: 'NOT_REQUIRED', sourceStatus: 'NOT_REQUIRED', networkConsistencyStatus: 'HEALTHY',
+      reapplyRequired: false, differences: [], warnings: [], errorCode: null, previewedAtEpochMillis: 1,
+      appliedResolutionGeneration: 4, superseded: false } as const
+    const fetch = vi.fn().mockResolvedValueOnce(response(preview)).mockResolvedValueOnce(response(state()))
+    vi.stubGlobal('fetch', fetch)
+    const api = new BackendApiClient('/api/v1', () => 'cmd-reapply')
+    const signal = new AbortController().signal
+    expect(await api.previewRaspberryPiUdpNetwork('pi', profile().network, signal)).toEqual(preview)
+    await api.applyRaspberryPiUdpConfiguration('pi', 12, 12, 12, 4, true, signal)
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ network: profile().network })
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ commandId: 'cmd-reapply', revision: 12,
+      expectedSavedRevision: 12, expectedAppliedRevision: 12, expectedResolutionGeneration: 4, forceReapply: true })
+  })
+
   it('preserves explicit no-interface state and nullable diagnostic metadata', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...interfaces, interfaces: [], advertisedBackendIpv4: null, statusDetail: 'NO_USABLE_IPV4_INTERFACE' })))
-    expect(await new BackendApiClient().getNetworkInterfaces()).toMatchObject({ interfaces: [], advertisedBackendIpv4: null, statusDetail: 'NO_USABLE_IPV4_INTERFACE' })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ interfaces: [] })))
+    expect(await new BackendApiClient().getNetworkInterfaces()).toEqual({ interfaces: [] })
   })
 
   it('creates polls and releases one lease with encoded ids and full unsigned frame metadata', async () => {
@@ -136,8 +154,9 @@ describe('BackendApiClient single-stream contracts', () => {
   const bodyCancellationCases: [string, (api: BackendApiClient, signal: AbortSignal) => Promise<unknown>][] = [
     ['configuration GET', (api, signal) => api.getRaspberryPiUdpConfiguration('pi', signal)],
     ['configuration Save', (api, signal) => api.saveRaspberryPiUdpConfiguration('pi', profile(), 1, signal)],
-    ['configuration Apply', (api, signal) => api.applyRaspberryPiUdpConfiguration('pi', 1, 1, signal)],
+    ['configuration Apply', (api, signal) => api.applyRaspberryPiUdpConfiguration('pi', 1, 1, 1, 0, false, signal)],
     ['network interfaces', (api, signal) => api.getNetworkInterfaces(signal)],
+    ['network preview', (api, signal) => api.previewRaspberryPiUdpNetwork('pi', profile().network, signal)],
     ['diagnostics', (api, signal) => api.getRaspberryPiUdpDiagnostics('pi', signal)],
     ['Inspector create', (api, signal) => api.createRaspberryPiInspectorLease('pi', 128, signal)],
     ['Inspector release', (api, signal) => api.releaseRaspberryPiInspectorLease('pi', 'lease', signal)],

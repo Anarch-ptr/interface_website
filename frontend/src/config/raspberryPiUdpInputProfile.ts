@@ -10,7 +10,7 @@ export function createPayloadDraft(format: PayloadFormat): ImagePayload {
 }
 
 export function defaultRaspberryPiUdpInputProfile(): RaspberryPiUdpInputProfile {
-  return { enabled: false, networkInterface: { mode: 'AUTO' }, listenPort: 5000, raspberryPiIpv4: null,
+  return { enabled: false, network: { bind: { mode: 'AUTO' }, destination: { mode: 'AUTO' }, sourceFilter: { mode: 'ANY' }, listenPort: 5000 },
     payload: createPayloadDraft('JPEG'), envelope: { headerHex: 'AA 01', footerHex: '0D 0A' },
     transportLimits: { maxInFlightFrames: 2, maxFrameBytes: 32 * 1024 * 1024, frameTimeoutMs: 1000,
       maxChunkCount: 32768, maxChunkPayloadBytes: 1400 } }
@@ -34,12 +34,25 @@ export function validateRaspberryPiUdpInputProfile(value: RaspberryPiUdpInputPro
       errors.push({ path, message: 'Accepts only canonical IPv4 literals' })
     }
   }
-  bounded('listenPort', value.listenPort, 1, 65535)
-  if (value.networkInterface.mode === 'SPECIFIC') {
-    if (!value.networkInterface.interfaceId.trim()) errors.push({ path: 'networkInterface.interfaceId', message: 'Select a network interface' })
-    ipv4('networkInterface.ipv4', value.networkInterface.ipv4)
+  const hostOrIpv4 = (path: string, input: string) => {
+    const candidate = input.trim().toLowerCase()
+    const parts = candidate.split('.')
+    const canonicalIpv4 = parts.length === 4 && parts.every((part) =>
+      /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)
+    const malformedNumeric = /^[0-9.]+$/.test(candidate) && !canonicalIpv4
+    if (input !== input.trim() || malformedNumeric || !candidate || candidate.length > 253 || candidate.includes(':') ||
+      (!/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(candidate) &&
+        !/^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){3}$/.test(candidate))) {
+      errors.push({ path, message: 'Enter a valid hostname or canonical IPv4 address' })
+    }
   }
-  if (value.raspberryPiIpv4 !== null) ipv4('raspberryPiIpv4', value.raspberryPiIpv4)
+  bounded('network.listenPort', value.network.listenPort, 1, 65535)
+  if (value.network.bind.mode === 'SPECIFIC_INTERFACE') {
+    if (!value.network.bind.interfaceId.trim()) errors.push({ path: 'network.bind.interfaceId', message: 'Select a network interface' })
+    ipv4('network.bind.ipv4', value.network.bind.ipv4)
+  } else if (value.network.bind.mode === 'MANUAL_IP') ipv4('network.bind.ipv4', value.network.bind.ipv4)
+  if (value.network.destination.mode === 'MANUAL') hostOrIpv4('network.destination.hostOrIpv4', value.network.destination.hostOrIpv4)
+  if (value.network.sourceFilter.mode === 'IP_OR_HOST') hostOrIpv4('network.sourceFilter.hostOrIpv4', value.network.sourceFilter.hostOrIpv4)
   const limits = value.transportLimits
   bounded('transportLimits.maxInFlightFrames', limits.maxInFlightFrames, 1, 32)
   bounded('transportLimits.maxFrameBytes', limits.maxFrameBytes, 1, 32 * 1024 * 1024)

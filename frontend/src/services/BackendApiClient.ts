@@ -21,9 +21,15 @@ export class BackendApiClient {
     return this.singleJson(`${this.device(device)}/udp-input-configuration`, 'PUT', body, signal)
   }
   applyRaspberryPiUdpConfiguration(device: string, revision: number, expectedSavedRevision: number,
+    expectedAppliedRevision: number, expectedResolutionGeneration: number, forceReapply: boolean,
     signal?: AbortSignal): Promise<Single.UdpConfigurationState> {
-    const body: Single.ApplyUdpConfigurationRequest = { commandId: this.commandId(), revision, expectedSavedRevision }
+    const body: Single.ApplyUdpConfigurationRequest = { commandId: this.commandId(), revision, expectedSavedRevision,
+      expectedAppliedRevision, expectedResolutionGeneration, forceReapply }
     return this.singleJson(`${this.device(device)}/udp-input-configuration/apply`, 'POST', body, signal)
+  }
+  previewRaspberryPiUdpNetwork(device: string, network: Single.UdpNetworkProfile,
+    signal?: AbortSignal): Promise<Single.NetworkResolutionPreview> {
+    return this.singleJson(`${this.device(device)}/udp-network-resolution-preview`, 'POST', { network }, signal)
   }
   getNetworkInterfaces(signal?: AbortSignal): Promise<Single.NetworkInterfaces> {
     return this.singleGet(`${this.baseUrl}/network-interfaces`, signal)
