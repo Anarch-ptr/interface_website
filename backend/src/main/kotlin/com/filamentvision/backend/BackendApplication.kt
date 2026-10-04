@@ -25,6 +25,7 @@ fun parseBackendOptions(args: Array<String>): BackendOptions {
         Path.of(values["--snapshot-root"] ?: "build/snapshots").toAbsolutePath().normalize(), host, port)
 }
 fun Application.installBackend(composition: BackendComposition) {
+    installHealthApi()
     installRestApi(composition.application)
     installEventWebSocket(composition.application, composition.events, setOf(composition.deviceId), composition.epochMillis,
         pollIntervalMillis = { composition.applied.publicationIntervalMillis })

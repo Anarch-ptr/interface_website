@@ -5,6 +5,12 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $runtimeRoot = Join-Path $projectRoot '.filamentvision-runtime'
+$logRoot = Join-Path $projectRoot 'logs'
+$launcherLog = Join-Path $logRoot 'launcher.log'
+New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+function Write-StopLog([string] $Message) {
+    Add-Content -LiteralPath $launcherLog -Value "[$([DateTime]::Now.ToString('s'))] STOP $Message" -Encoding UTF8
+}
 $targets = @(
     @{ Name = 'frontend'; PidFile = (Join-Path $runtimeRoot 'frontend.pid'); Marker = 'Run-Frontend.cmd' },
     @{ Name = 'backend'; PidFile = (Join-Path $runtimeRoot 'backend.pid'); Marker = 'Run-Backend.cmd' }
@@ -14,6 +20,7 @@ $failed = $false
 foreach ($target in $targets) {
     if (-not (Test-Path -LiteralPath $target.PidFile)) {
         Write-Host "$($target.Name) has no launcher PID file; nothing to stop."
+        Write-StopLog "$($target.Name) no owned PID"
         continue
     }
 
@@ -29,11 +36,13 @@ foreach ($target in $targets) {
     if ($null -eq $process) {
         Write-Host "$($target.Name) launcher is already stopped."
         Remove-Item -LiteralPath $target.PidFile -Force
+        Write-StopLog "$($target.Name) already stopped pid=$savedPid"
         continue
     }
     if ($process.Name -ne 'cmd.exe' -or $process.CommandLine -notlike "*$($target.Marker)*") {
         Write-Warning "PID $savedPid no longer belongs to the FilamentVision $($target.Name) launcher; it was not terminated."
         Remove-Item -LiteralPath $target.PidFile -Force
+        Write-StopLog "$($target.Name) refused stale/unowned pid=$savedPid"
         $failed = $true
         continue
     }
@@ -41,10 +50,12 @@ foreach ($target in $targets) {
     & taskkill.exe /PID $savedPid /T /F | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Could not stop the $($target.Name) process tree rooted at PID $savedPid."
+        Write-StopLog "$($target.Name) stop failed pid=$savedPid"
         $failed = $true
     } else {
         Write-Host "Stopped $($target.Name) process tree rooted at PID $savedPid."
         Remove-Item -LiteralPath $target.PidFile -Force
+        Write-StopLog "$($target.Name) stopped pid=$savedPid"
     }
 }
 
