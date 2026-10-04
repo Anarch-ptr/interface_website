@@ -201,9 +201,12 @@ class UdpInputEndToEndTest {
                 profile(port).copy(envelope = DatagramEnvelopeProfile("BB 02", "0D 0A")))
             // Only the repository decision is intercepted; source, sockets, parser and SQLite CAS are real.
             val competing = object : RaspberryPiUdpInputProfileRepository by c.udpProfileRepository {
-                override suspend fun markApplied(expectedAppliedRevision: Long, revision: Long): Boolean {
+                override suspend fun markApplied(expectedAppliedRevision: Long,
+                    expectedResolutionGeneration: Long, revision: Long,
+                    plan: com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan): Boolean {
                     c.udpProfileRepository.save(candidate.revision, candidate.profile.copy(envelope = DatagramEnvelopeProfile("CC 03", "0D 0A")))
-                    return c.udpProfileRepository.markApplied(expectedAppliedRevision, revision)
+                    return c.udpProfileRepository.markApplied(expectedAppliedRevision,
+                        expectedResolutionGeneration, revision, plan)
                 }
             }
             val conflicting = RaspberryPiUdpInputConfigurationService(competing, checkNotNull(c.udpInputRouter))
@@ -493,9 +496,18 @@ class UdpInputEndToEndTest {
     }
     private suspend fun open(name: String) = BackendComposition.open(
         temporary.root.toPath().resolve("$name.db"), temporary.root.toPath().resolve("$name-objects"))
-    private fun profile(port: Int) = RaspberryPiUdpInputProfile.defaults().copy(
-        enabled = true, listenPort = port, payload = ImagePayloadProfile.Gray8(48, 8),
-        transportLimits = TransportLimits(2, 1024, 500, 16, 128))
+    private fun profile(port: Int): RaspberryPiUdpInputProfile {
+        val defaults = RaspberryPiUdpInputProfile.defaults()
+        return defaults.copy(
+            enabled = true,
+            network = defaults.network.copy(
+                destination = AdvertisedDestinationProfile.Manual("127.0.0.1"),
+                listenPort = port,
+            ),
+            payload = ImagePayloadProfile.Gray8(48, 8),
+            transportLimits = TransportLimits(2, 1024, 500, 16, 128),
+        )
+    }
     private fun send(sender: UdpTestSender, port: Int, id: Long, width: Int = 35, header: ByteArray = byteArrayOf(0xaa.toByte(), 1)) {
         val left = (48 - width) / 2
         val pixels = ByteArray(48 * 8) { if (it % 48 in left until left + width) 20 else 200.toByte() }

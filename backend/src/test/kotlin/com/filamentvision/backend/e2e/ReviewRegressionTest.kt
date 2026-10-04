@@ -47,8 +47,11 @@ class ReviewRegressionTest {
         val port = DatagramSocket(0).use { it.localPort }
         try {
             val service = checkNotNull(c.udpInputService)
-            val saved = service.save(1, RaspberryPiUdpInputProfile.defaults().copy(enabled = true,
-                listenPort = port, payload = ImagePayloadProfile.Gray8(48, 8)))
+            val defaults = RaspberryPiUdpInputProfile.defaults()
+            val saved = service.save(1, defaults.copy(enabled = true,
+                network = defaults.network.copy(
+                    destination = AdvertisedDestinationProfile.Manual("127.0.0.1"), listenPort = port),
+                payload = ImagePayloadProfile.Gray8(48, 8)))
             service.apply(saved.revision)
             processor.set(c.runtime, object : VisionAnalyzer {
                 override fun process(frame: CameraFrame, configuration: VisionConfiguration, decodeNanos: Long): VisionResult {

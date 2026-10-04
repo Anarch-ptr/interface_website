@@ -7,12 +7,15 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 
-internal class UdpTestSender : AutoCloseable {
-    private val loopback = InetAddress.getByName("127.0.0.1")
-    private val socket = DatagramSocket(InetSocketAddress(loopback, 0))
+internal class UdpTestSender(
+    sourceIpv4: String = "127.0.0.1",
+    destinationIpv4: String = "127.0.0.1",
+) : AutoCloseable {
+    private val destination = InetAddress.getByName(destinationIpv4)
+    private val socket = DatagramSocket(InetSocketAddress(InetAddress.getByName(sourceIpv4), 0))
 
     fun send(port: Int, bytes: ByteArray) {
-        socket.send(DatagramPacket(bytes, bytes.size, loopback, port))
+        socket.send(DatagramPacket(bytes, bytes.size, destination, port))
     }
 
     fun sendStructured(
