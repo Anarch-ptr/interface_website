@@ -7,7 +7,7 @@ import com.filamentvision.core.runtime.*
 import com.filamentvision.core.session.SessionStatistics
 import com.filamentvision.core.vision.CameraMeasurementSource
 import com.filamentvision.backend.input.profile.*
-import com.filamentvision.backend.input.network.ResolutionStatus
+import com.filamentvision.backend.input.network.*
 import com.filamentvision.backend.input.runtime.*
 import kotlinx.coroutines.runBlocking
 import java.sql.DriverManager
@@ -435,6 +435,8 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
     @Test fun raspberryPiSavedAndAppliedCasRejectsStaleSaveAndApplyAndSurvivesReopen() = runBlocking {
         val repo = SqliteRaspberryPiUdpInputProfileRepository(database)
         val initial = repo.state()
+        assertEquals(0L, initial.resolutionGeneration)
+        assertNotNull(initial.appliedPlan)
         val second = repo.save(1, initial.saved.profile.copy(enabled = true, listenPort = 6001,
             envelope = DatagramEnvelopeProfile("abcd", "12ef")))
         assertEquals(2L, second.revision)
@@ -442,20 +444,25 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
         assertEquals(initial.applied, repo.state().applied)
         fails(RepositoryFailure.CONFLICT) { runBlocking { repo.save(1, initial.saved.profile) } }
         assertEquals(second, repo.state().saved)
-        assertFalse(repo.markApplied(99, 2))
-        assertFalse(repo.markApplied(1, 99))
+        assertFalse(repo.markApplied(99, 0, 2, plan(1)))
+        assertFalse(repo.markApplied(1, 99, 2, plan(100)))
+        assertFalse(repo.markApplied(1, 0, 99, plan(1)))
         val third = repo.save(2, second.profile.copy(listenPort = 6002))
-        assertFalse(repo.markApplied(1, 2))
+        assertFalse(repo.markApplied(1, 0, 2, plan(1)))
         assertEquals(initial.applied, repo.state().applied)
-        assertTrue(repo.markApplied(1, 3))
-        assertFalse(repo.markApplied(1, 3))
-        assertTrue(repo.markApplied(3, 3))
+        val generation1 = plan(1)
+        assertTrue(repo.markApplied(1, 0, 3, generation1))
+        assertFalse(repo.markApplied(1, 0, 3, generation1))
+        val generation2 = plan(2)
+        assertTrue(repo.markApplied(3, 1, 3, generation2))
         assertEquals(third, repo.state().applied)
+        assertEquals(generation2, repo.state().appliedPlan)
+        assertEquals(2L, repo.state().resolutionGeneration)
         fails(RepositoryFailure.INVALID) { runBlocking { repo.save(3, third.profile.copy(listenPort = 0)) } }
         assertEquals(third, repo.state().saved)
         database.close()
         database = SqliteDatabase(temporary.root.toPath().resolve("test.db"))
-        assertEquals(RaspberryPiUdpProfileState(third, third), SqliteRaspberryPiUdpInputProfileRepository(database).state())
+        assertEquals(RaspberryPiUdpProfileState(third, third, generation2, 2), SqliteRaspberryPiUdpInputProfileRepository(database).state())
     }
 
     @Test fun separateConnectionsCannotBothWinTheSameProfileSaveCas() {
@@ -477,6 +484,32 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
         }
     }
 
+    @Test fun separateConnectionsCannotLoseASameRevisionResolutionGenerationUpdate() {
+        SqliteDatabase(temporary.root.toPath().resolve("test.db")).use { other ->
+            val ready = CountDownLatch(2)
+            val start = CountDownLatch(1)
+            val executor = Executors.newFixedThreadPool(2)
+            try {
+                val repositories = listOf(
+                    SqliteRaspberryPiUdpInputProfileRepository(database),
+                    SqliteRaspberryPiUdpInputProfileRepository(other),
+                )
+                val results = repositories.mapIndexed { index, repository -> executor.submit<Boolean> {
+                    ready.countDown(); check(start.await(5, TimeUnit.SECONDS))
+                    runBlocking { repository.markApplied(1, 0, 1, plan(1).copy(planCreatedAtEpochMillis = 10L + index)) }
+                } }
+                assertTrue(ready.await(5, TimeUnit.SECONDS)); start.countDown()
+                assertEquals(listOf(false, true).toSet(), results.map { it.get(10, TimeUnit.SECONDS) }.toSet())
+                val state = runBlocking { repositories.first().state() }
+                assertEquals(1L, state.applied.revision)
+                assertEquals(1L, state.resolutionGeneration)
+                assertEquals(1L, state.appliedPlan?.resolutionGeneration)
+            } finally {
+                start.countDown(); executor.shutdownNow()
+            }
+        }
+    }
+
     @Test fun profileSqlFailureRollsBackInsertedRevisionAndBothPointers() = runBlocking {
         val repo = SqliteRaspberryPiUdpInputProfileRepository(database)
         val initial = repo.state()
@@ -494,8 +527,8 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
         database.access(true) { c -> c.createStatement().use {
             it.execute("CREATE TRIGGER fail_profile_apply BEFORE UPDATE OF applied_revision ON raspberry_pi_udp_input_state BEGIN SELECT RAISE(ABORT,'test failure'); END")
         } }
-        assertThrows(RepositoryException::class.java) { runBlocking { repo.markApplied(1, 2) } }
-        assertEquals(RaspberryPiUdpProfileState(second, initial.applied), repo.state())
+        assertThrows(RepositoryException::class.java) { runBlocking { repo.markApplied(1, 0, 2, plan(1)) } }
+        assertEquals(RaspberryPiUdpProfileState(second, initial.applied, initial.appliedPlan, 0), repo.state())
     }
 
     @Test fun newWritesUseNeutralSchemaAndMonitoringCodecVersionTwoEvenWithLegacyMetadata() {
@@ -554,6 +587,11 @@ class SqliteRepositoryContractTest : RepositoryConformance() {
 
     private fun safeFraming() = ApplicationFramingProfile(true, FramingFormat.HEX, "abcd", FramingScope.DATAGRAM, true,
         true, FramingFormat.HEX, "12ef", FramingScope.DATAGRAM, true)
+
+    private fun plan(generation: Long) = EffectiveUdpNetworkPlan.inactive(generation).applied(
+        appliedAt = 100 + generation,
+        generation = generation,
+    )
 
     private fun createLegacyDatabase(path: Path, version: Int, seed: (Connection) -> Unit) {
         DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
