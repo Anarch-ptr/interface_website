@@ -192,6 +192,11 @@ code { color: var(--primary); font-family: "SFMono-Regular", Consolas, monospace
 .udp-section legend { padding: 0 8px; }
 .udp-section .udp-field, .udp-section .packet-inspector, .udp-section .inspector-open, .udp-section .udp-diagnostics { margin-inline: 0; }
 .udp-target { margin-top: 14px; color: var(--primary); overflow-wrap: anywhere; }
+.udp-preview { margin-top: 14px; padding: 12px; border: 1px solid rgba(255, 198, 109, .3); border-radius: 8px; background: var(--warning-soft); }
+.udp-preview strong { color: var(--warning); font-size: .68rem; letter-spacing: .08em; text-transform: uppercase; }
+.udp-preview p { margin: 5px 0 0; color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
+.udp-advanced { margin-top: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.udp-advanced summary { color: var(--muted); cursor: pointer; font-size: .75rem; font-weight: 700; }
 .udp-revisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 22px; }
 .udp-profile-summary { border: 1px solid var(--border); border-radius: 9px; padding: 14px; min-width: 0; }
 .udp-profile-summary p, .udp-profile-summary summary { font-size: .75rem; line-height: 1.6; color: var(--muted); }

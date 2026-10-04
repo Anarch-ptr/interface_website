@@ -1,8 +1,13 @@
 import { defaultRaspberryPiUdpInputProfile } from '../config/raspberryPiUdpInputProfile'
 import type { InspectorSnapshot, NetworkInterfaces, UdpConfigurationState, UdpDiagnostics } from '../domain/raspberryPiUdpInput'
 
-export const udpState = (): UdpConfigurationState => ({ savedRevision: 1, appliedRevision: 1,
+export const udpState = (): UdpConfigurationState => ({ savedRevision: 1, appliedRevision: 1, resolutionGeneration: 1,
   configuration: defaultRaspberryPiUdpInputProfile(), appliedConfiguration: defaultRaspberryPiUdpInputProfile(),
+  appliedEffectiveNetworkPlan: { actualBindIpv4: '0.0.0.0', actualBindInterfaceId: null,
+    configuredDestination: null, resolvedDestinationIpv4: '192.168.1.3', configuredSource: null,
+    resolvedSourceIpv4s: [], destinationStatus: 'RESOLVED', sourceStatus: 'NOT_REQUIRED',
+    planCreatedAtEpochMillis: 100, appliedAtEpochMillis: 101, resolutionGeneration: 1 },
+  networkConsistencyStatus: 'HEALTHY', reapplyRequired: false, lastApplyError: null,
   protocolVersion: 1, transportMode: 'STRUCTURED_CHUNKED', outcome: null })
 export const networkInterfaces: NetworkInterfaces = {
   interfaces: [
@@ -10,8 +15,7 @@ export const networkInterfaces: NetworkInterfaces = {
     { id: 'vpn', displayName: 'VPN', ipv4: '10.0.0.2', isUp: true, isLoopback: false, isVirtual: true, supportsMulticast: false },
     { id: 'loopback', displayName: 'Loopback', ipv4: '127.0.0.1', isUp: true, isLoopback: true, isVirtual: false, supportsMulticast: false },
     { id: 'down', displayName: 'Offline', ipv4: '10.0.0.4', isUp: false, isLoopback: false, isVirtual: false, supportsMulticast: false },
-  ], selection: { mode: 'AUTO' }, advertisedBackendIpv4: '192.168.1.3', listenPort: 5000,
-  hasMultipleCandidates: true, statusDetail: null,
+  ],
 }
 export const udpDiagnostics: UdpDiagnostics = {
   status: 'SOURCE_IP_MISMATCH', statusDetail: null, datagramsReceived: 3, bytesReceived: 90, framesStarted: null,
@@ -20,12 +24,13 @@ export const udpDiagnostics: UdpDiagnostics = {
   invalidPayloadSizeCount: 0, decodeFailures: 4, sourceFilteredDatagrams: 3, oversizedOrTruncatedDatagrams: 0,
   lastPacketMonotonicNanos: 123, lastValidFrameMonotonicNanos: null, lastPacketSourceIpv4: '192.168.1.4',
   lastPacketSourcePort: 6000, lastPacketEpochMillis: 456, preAdmissionDroppedInputs: 5, processingBackpressureDrops: 6,
+  appliedNetwork: null,
 }
 export const inspectorSnapshot = (sequence = 1): InspectorSnapshot => ({ sequence,
   rawDatagram: { sourceIpv4: '192.168.1.4', sourcePort: 6000, backendListenPort: 5000, datagramSize: 40,
     receivedAtMonotonicNanos: 123, status: 'HEADER_MISMATCH', headerHex: 'AB 01', footerHex: '0D 0A',
     expectedHeaderHex: 'AA 01', expectedFooterHex: '0D 0A', headerMatched: false, footerMatched: true,
-    hexPreview: `AB 0${sequence}`, transport: null },
+    hexPreview: `AB 0${sequence}`, transport: null, appliedNetwork: null },
   parsedFrame: null,
 })
 export const apiResponse = (data: unknown, status = 200, etag?: string) => new Response(
