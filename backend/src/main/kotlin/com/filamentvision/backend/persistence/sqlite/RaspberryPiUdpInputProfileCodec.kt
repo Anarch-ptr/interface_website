@@ -9,7 +9,7 @@ import java.nio.charset.StandardCharsets
 
 /** Single image stream persistence, independent of REST and the legacy two-camera codec. */
 object RaspberryPiUdpInputProfileCodec {
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     fun encode(profile: RaspberryPiUdpInputProfile): ByteArray {
         val canonical = canonicalize(profile)
@@ -17,15 +17,23 @@ object RaspberryPiUdpInputProfileCodec {
             DataOutputStream(bytes).use { out ->
                 out.writeInt(VERSION)
                 out.writeBoolean(canonical.enabled)
-                when (val selection = canonical.networkInterface) {
-                    NetworkInterfaceSelection.Auto -> out.writeUTF("AUTO")
-                    is NetworkInterfaceSelection.Specific -> {
-                        out.writeUTF("SPECIFIC"); out.writeInterfaceId(selection.interfaceId); out.writeUTF(selection.ipv4)
+                when (val bind = canonical.network.bind) {
+                    BindProfile.Auto -> out.writeUTF("AUTO")
+                    BindProfile.AllInterfaces -> out.writeUTF("ALL_INTERFACES")
+                    is BindProfile.SpecificInterface -> {
+                        out.writeUTF("SPECIFIC"); out.writeInterfaceId(bind.interfaceId); out.writeUTF(bind.ipv4)
                     }
+                    is BindProfile.ManualIp -> { out.writeUTF("MANUAL_IP"); out.writeUTF(bind.ipv4) }
                 }
-                out.writeInt(canonical.listenPort)
-                out.writeBoolean(canonical.raspberryPiIpv4 != null)
-                canonical.raspberryPiIpv4?.let(out::writeUTF)
+                when (val destination = canonical.network.destination) {
+                    AdvertisedDestinationProfile.Auto -> out.writeUTF("AUTO")
+                    is AdvertisedDestinationProfile.Manual -> { out.writeUTF("MANUAL"); out.writeUTF(destination.hostOrIpv4) }
+                }
+                when (val source = canonical.network.sourceFilter) {
+                    SourceFilterProfile.Any -> out.writeUTF("ANY")
+                    is SourceFilterProfile.IpOrHost -> { out.writeUTF("IP_OR_HOST"); out.writeUTF(source.hostOrIpv4) }
+                }
+                out.writeInt(canonical.network.listenPort)
                 when (val payload = canonical.payload) {
                     is ImagePayloadProfile.Jpeg -> {
                         out.writeUTF("JPEG"); out.writeInt(payload.maxFrameBytes)
@@ -50,15 +58,10 @@ object RaspberryPiUdpInputProfileCodec {
 
     fun decode(bytes: ByteArray): RaspberryPiUdpInputProfile = try {
         DataInputStream(ByteArrayInputStream(bytes)).use { input ->
-            require(input.readInt() == VERSION) { "Unsupported Raspberry Pi UDP profile codec version" }
+            val version = input.readInt()
+            require(version == 1 || version == VERSION) { "Unsupported Raspberry Pi UDP profile codec version" }
             val enabled = input.readBoolean()
-            val network = when (val type = input.readUTF()) {
-                "AUTO" -> NetworkInterfaceSelection.Auto
-                "SPECIFIC" -> NetworkInterfaceSelection.Specific(input.readInterfaceId(), input.readUTF())
-                else -> throw IllegalArgumentException("Unknown network interface selection $type")
-            }
-            val port = input.readInt()
-            val source = if (input.readBoolean()) input.readUTF() else null
+            val network = if (version == 1) input.readV1Network() else input.readV2Network()
             val payload = when (val type = input.readUTF()) {
                 "JPEG" -> ImagePayloadProfile.Jpeg(input.readInt(), input.readNullableInt(), input.readNullableInt())
                 "GRAY8" -> ImagePayloadProfile.Gray8(input.readInt(), input.readInt())
@@ -69,7 +72,7 @@ object RaspberryPiUdpInputProfileCodec {
             val envelope = DatagramEnvelopeProfile(input.readUTF(), input.readUTF())
             val limits = TransportLimits(input.readInt(), input.readInt(), input.readLong(), input.readInt(), input.readInt())
             require(input.available() == 0) { "Trailing Raspberry Pi UDP profile bytes" }
-            canonicalize(RaspberryPiUdpInputProfile(enabled, network, port, source, payload, envelope, limits))
+            canonicalize(RaspberryPiUdpInputProfile(enabled, network, payload, envelope, limits))
         }
     } catch (error: IllegalArgumentException) {
         throw error
@@ -80,8 +83,55 @@ object RaspberryPiUdpInputProfileCodec {
     private fun canonicalize(profile: RaspberryPiUdpInputProfile): RaspberryPiUdpInputProfile {
         val validation = RaspberryPiUdpInputProfileValidator().validate(profile)
         require(validation.isValid) { "Invalid Raspberry Pi UDP profile: ${validation.errors}" }
-        return profile.copy(envelope = DatagramEnvelopeProfile(
-            normalizeTwoByteHex(profile.envelope.headerHex), normalizeTwoByteHex(profile.envelope.footerHex)))
+        val network = profile.network.copy(
+            destination = when (val destination = profile.network.destination) {
+                AdvertisedDestinationProfile.Auto -> destination
+                is AdvertisedDestinationProfile.Manual -> AdvertisedDestinationProfile.Manual(normalizeHostOrIpv4(destination.hostOrIpv4))
+            },
+            sourceFilter = when (val source = profile.network.sourceFilter) {
+                SourceFilterProfile.Any -> source
+                is SourceFilterProfile.IpOrHost -> SourceFilterProfile.IpOrHost(normalizeHostOrIpv4(source.hostOrIpv4))
+            },
+        )
+        return profile.copy(
+            network = network,
+            envelope = DatagramEnvelopeProfile(
+                normalizeTwoByteHex(profile.envelope.headerHex),
+                normalizeTwoByteHex(profile.envelope.footerHex),
+            ),
+        )
+    }
+
+    private fun DataInputStream.readV1Network(): UdpNetworkProfile {
+        val bind = when (val type = readUTF()) {
+            "AUTO" -> BindProfile.Auto
+            "SPECIFIC" -> BindProfile.SpecificInterface(readInterfaceId(), readUTF())
+            else -> throw IllegalArgumentException("Unknown network interface selection $type")
+        }
+        val port = readInt()
+        val source = if (readBoolean()) SourceFilterProfile.IpOrHost(readUTF()) else SourceFilterProfile.Any
+        return UdpNetworkProfile(bind, AdvertisedDestinationProfile.Auto, source, port)
+    }
+
+    private fun DataInputStream.readV2Network(): UdpNetworkProfile {
+        val bind = when (val type = readUTF()) {
+            "AUTO" -> BindProfile.Auto
+            "ALL_INTERFACES" -> BindProfile.AllInterfaces
+            "SPECIFIC" -> BindProfile.SpecificInterface(readInterfaceId(), readUTF())
+            "MANUAL_IP" -> BindProfile.ManualIp(readUTF())
+            else -> throw IllegalArgumentException("Unknown bind mode $type")
+        }
+        val destination = when (val type = readUTF()) {
+            "AUTO" -> AdvertisedDestinationProfile.Auto
+            "MANUAL" -> AdvertisedDestinationProfile.Manual(readUTF())
+            else -> throw IllegalArgumentException("Unknown destination mode $type")
+        }
+        val source = when (val type = readUTF()) {
+            "ANY" -> SourceFilterProfile.Any
+            "IP_OR_HOST" -> SourceFilterProfile.IpOrHost(readUTF())
+            else -> throw IllegalArgumentException("Unknown source filter mode $type")
+        }
+        return UdpNetworkProfile(bind, destination, source, readInt())
     }
 
     private fun DataOutputStream.writeInterfaceId(value: String) {

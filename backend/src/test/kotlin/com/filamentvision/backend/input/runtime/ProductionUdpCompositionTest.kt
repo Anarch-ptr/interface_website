@@ -4,6 +4,7 @@ import com.filamentvision.backend.BackendComposition
 import com.filamentvision.backend.parseBackendOptions
 import com.filamentvision.backend.application.*
 import com.filamentvision.backend.input.profile.RaspberryPiUdpInputProfile
+import com.filamentvision.backend.input.profile.copy
 import com.filamentvision.backend.simulator.fixtures.*
 import com.filamentvision.core.frame.CameraId
 import com.filamentvision.core.runtime.StartOutcome

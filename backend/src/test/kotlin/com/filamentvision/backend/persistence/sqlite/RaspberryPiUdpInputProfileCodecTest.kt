@@ -8,6 +8,36 @@ import java.io.DataInputStream
 import java.nio.ByteBuffer
 
 class RaspberryPiUdpInputProfileCodecTest {
+    @Test fun literalVersionOneDefaultsDecodeIntoEquivalentFlexibleIntent() {
+        val decoded = decode(hex(
+            "00000001 00 0004 4155544F 00001388 00 0004 4A504547 01000000 00 00 " +
+                "0005 4141203031 0005 3044203041 00000002 02000000 00000000000003E8 00008000 00000578",
+        ))
+        assertFalse(decoded.enabled)
+        assertEquals(BindProfile.Auto, decoded.network.bind)
+        assertEquals(AdvertisedDestinationProfile.Auto, decoded.network.destination)
+        assertEquals(SourceFilterProfile.Any, decoded.network.sourceFilter)
+        assertEquals(5_000, decoded.network.listenPort)
+        assertEquals(ImagePayloadProfile.Jpeg(), decoded.payload)
+    }
+
+    @Test fun versionTwoRoundTripsEveryFlexibleNetworkModeAndNormalizedHostname() {
+        val defaults = RaspberryPiUdpInputProfile.defaults()
+        val networks = listOf(
+            UdpNetworkProfile(BindProfile.Auto, AdvertisedDestinationProfile.Auto, SourceFilterProfile.Any, 5_000),
+            UdpNetworkProfile(BindProfile.AllInterfaces, AdvertisedDestinationProfile.Manual("Backend.LOCAL."), SourceFilterProfile.IpOrHost("PI.LOCAL."), 51_001),
+            UdpNetworkProfile(BindProfile.SpecificInterface("wifi-stable", "10.0.0.2"), AdvertisedDestinationProfile.Manual("10.0.0.2"), SourceFilterProfile.IpOrHost("10.0.0.20"), 51_002),
+            UdpNetworkProfile(BindProfile.ManualIp("192.168.1.8"), AdvertisedDestinationProfile.Auto, SourceFilterProfile.Any, 51_003),
+        )
+        networks.forEach { network ->
+            val encoded = encode(defaults.withNetwork(network))
+            assertEquals(2, ByteBuffer.wrap(encoded).int)
+            val decoded = decode(encoded)
+            assertEquals(normalized(network), decoded.network)
+            assertEquals(defaults.payload, decoded.payload)
+        }
+    }
+
     @Test fun approvedInterfaceIdentifiersRoundTripAcrossUnsignedShortByteBoundary() {
         val identifiers = listOf("a".repeat(65_536), "a".repeat(65_535),
             "界".repeat(21_845), "界".repeat(21_846), "😀".repeat(16_384))
@@ -60,10 +90,10 @@ class RaspberryPiUdpInputProfileCodecTest {
         rejectsMalformedIdentifier("wifi-\uDC00")
     }
 
-    @Test fun versionOneRoundTripsDisabledDefaults() {
+    @Test fun versionTwoRoundTripsDisabledDefaults() {
         val expected = RaspberryPiUdpInputProfile.defaults()
         val encoded = encode(expected)
-        assertEquals(1, ByteBuffer.wrap(encoded).int)
+        assertEquals(2, ByteBuffer.wrap(encoded).int)
         assertEquals(expected, decode(encoded))
     }
 
@@ -100,7 +130,7 @@ class RaspberryPiUdpInputProfileCodecTest {
         val valid = encode(RaspberryPiUdpInputProfile.defaults())
         val before = valid.copyOf()
         for (bytes in listOf(byteArrayOf(), byteArrayOf(1, 2, 3), valid.copyOf(valid.size - 1),
-            valid + byteArrayOf(0), valid.copyOf().also { ByteBuffer.wrap(it).putInt(2) })) {
+            valid + byteArrayOf(0), valid.copyOf().also { ByteBuffer.wrap(it).putInt(99) })) {
             assertThrows(IllegalArgumentException::class.java) { decode(bytes) }
         }
         assertArrayEquals(before, valid)
@@ -108,7 +138,7 @@ class RaspberryPiUdpInputProfileCodecTest {
 
     @Test fun rejectsInvalidProfilesBeforeEncoding() {
         val defaults = RaspberryPiUdpInputProfile.defaults()
-        val invalid = listOf(defaults.copy(listenPort = 0), defaults.copy(raspberryPiIpv4 = "pi.local"),
+        val invalid = listOf(defaults.copy(listenPort = 0), defaults.copy(raspberryPiIpv4 = "pi local"),
             defaults.copy(networkInterface = NetworkInterfaceSelection.Specific("", "192.168.1.10")),
             defaults.copy(payload = ImagePayloadProfile.Gray8(0, 17)),
             defaults.copy(transportLimits = defaults.transportLimits.copy(maxChunkCount = 65_536))) +
@@ -121,13 +151,12 @@ class RaspberryPiUdpInputProfileCodecTest {
 
     @Test fun rejectsInvalidStoredFieldsAndUnknownTypeTags() {
         val valid = encode(RaspberryPiUdpInputProfile.defaults())
-        // v1 AUTO/default JPEG field offsets are independently checked by the layout test below.
+        // v2 AUTO/AUTO/ANY/default JPEG offsets are independently checked by the layout test below.
         val invalid = listOf(
-            valid.copyOf().also { ByteBuffer.wrap(it, 11, 4).putInt(0) },
+            valid.copyOf().also { ByteBuffer.wrap(it, 22, 4).putInt(0) },
             valid.copyOf().also { it[7] = 'X'.code.toByte() }, // unknown interface tag
-            valid.copyOf().also { it[18] = 'X'.code.toByte() }, // unknown payload tag
-            valid.copyOf().also { it[30] = 'G'.code.toByte() }, // invalid HEX envelope
-            valid.copyOf().also { ByteBuffer.wrap(it, 58, 4).putInt(65_536) },
+            valid.copyOf().also { it[13] = 'X'.code.toByte() }, // unknown destination tag
+            valid.copyOf().also { it[28] = 'X'.code.toByte() }, // unknown payload tag
         )
         invalid.forEach { assertThrows(IllegalArgumentException::class.java) { decode(it) } }
     }
@@ -135,11 +164,12 @@ class RaspberryPiUdpInputProfileCodecTest {
     @Test fun storedLayoutContainsOnlyOneImageProfileAndFixedEnvelope() {
         val bytes = encode(RaspberryPiUdpInputProfile.defaults())
         DataInputStream(ByteArrayInputStream(bytes)).use { input ->
-            assertEquals(1, input.readInt())
+            assertEquals(2, input.readInt())
             assertFalse(input.readBoolean())
             assertEquals("AUTO", input.readUTF())
+            assertEquals("AUTO", input.readUTF())
+            assertEquals("ANY", input.readUTF())
             assertEquals(5000, input.readInt())
-            assertFalse(input.readBoolean())
             assertEquals("JPEG", input.readUTF())
             assertEquals(16 * 1024 * 1024, input.readInt())
             assertFalse(input.readBoolean())
@@ -165,4 +195,15 @@ class RaspberryPiUdpInputProfileCodecTest {
         assertThrows(IllegalArgumentException::class.java) { encode(candidate) }
         assertEquals(identifier, (candidate.networkInterface as NetworkInterfaceSelection.Specific).interfaceId)
     }
+
+    private fun normalized(network: UdpNetworkProfile) = network.copy(
+        destination = (network.destination as? AdvertisedDestinationProfile.Manual)?.let {
+            AdvertisedDestinationProfile.Manual(normalizeHostOrIpv4(it.hostOrIpv4))
+        } ?: network.destination,
+        sourceFilter = (network.sourceFilter as? SourceFilterProfile.IpOrHost)?.let {
+            SourceFilterProfile.IpOrHost(normalizeHostOrIpv4(it.hostOrIpv4))
+        } ?: network.sourceFilter,
+    )
+
+    private fun hex(value: String): ByteArray = value.filterNot(Char::isWhitespace).chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 }
