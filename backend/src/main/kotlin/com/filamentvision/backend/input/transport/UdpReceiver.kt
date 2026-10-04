@@ -24,7 +24,7 @@ import java.nio.channels.DatagramChannel
 import java.nio.channels.ClosedChannelException
 import kotlin.math.max
 
-enum class UdpReceiverState { IDLE, RUNNING, ERROR }
+enum class UdpReceiverState { IDLE, PREPARED, RUNNING, ERROR }
 
 enum class UdpReceiverDropReason { DATAGRAM_TOO_LARGE_OR_TRUNCATED }
 
@@ -104,8 +104,23 @@ class UdpReceiver(
         get() = channel?.getOption(StandardSocketOptions.SO_RCVBUF)
             ?: error("UDP receiver is not bound")
 
+    suspend fun prepare() = lifecycle.withLock {
+        if (channel?.isOpen == true) return@withLock
+        prepareLocked()
+    }
+
+    suspend fun commit() = lifecycle.withLock {
+        check(channel?.isOpen == true) { "UDP receiver must be prepared before commit" }
+        commitLocked()
+    }
+
     suspend fun start() = lifecycle.withLock {
         if (receiverJob?.isActive == true) return@withLock
+        if (channel?.isOpen != true) prepareLocked()
+        commitLocked()
+    }
+
+    private suspend fun prepareLocked() {
         var opening: DatagramChannel? = null
         val opened = try {
             withContext(dispatcher) {
@@ -126,6 +141,12 @@ class UdpReceiver(
         }
 
         channel = opened
+        state = UdpReceiverState.PREPARED
+    }
+
+    private fun commitLocked() {
+        if (receiverJob?.isActive == true) return
+        val opened = checkNotNull(channel) { "UDP receiver must be prepared before commit" }
         state = UdpReceiverState.RUNNING
         receiverJob = CoroutineScope(SupervisorJob() + dispatcher).launch {
             receiveLoop(opened)

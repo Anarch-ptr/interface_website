@@ -39,6 +39,7 @@ class RaspberryPiUdpInputSource(
     private val processingLock = Mutex()
     private val mailboxLock = Any()
     private val receiverStatusLock = Any()
+    private val preparedLock = Any()
     // Caller-owned frames may outlive a processor or receiver lifecycle.
     private val decodedPermit = DecodedFramePermit()
     @Volatile private var profile = profile
@@ -51,6 +52,10 @@ class RaspberryPiUdpInputSource(
     private var admitting = false
     private var processor: RaspberryPiUdpProcessor? = null
     @Volatile private var receiver: UdpReceiver? = null
+    @Volatile private var preparedReceiver: PreparedUdpReceiver? = null
+    private var preparingReceiver = false
+    @Volatile var maximumPreparedReceiverCount = 0
+        private set
     private var expiryJob: Job? = null
     private val mutableState = MutableStateFlow(ImageInputState.IDLE)
     private val mutableDiagnostics = MutableStateFlow(ImageInputDiagnostics())
@@ -106,7 +111,7 @@ class RaspberryPiUdpInputSource(
                     activity.failed("SELECTED_IPV4_INTERFACE_UNAVAILABLE")
                     throw error
                 }
-                val next = createReceiver(bindIpv4)
+                val next = createReceiver(bindIpv4, profile, appliedNetworkPlan)
                 receiver = next
                 next.start()
                 activity.bound(monotonicClock.nowNanos())
@@ -144,6 +149,8 @@ class RaspberryPiUdpInputSource(
 
     private suspend fun cleanup() {
         synchronized(mailboxLock) { admitting = false }
+        val candidate = synchronized(preparedLock) { preparedReceiver }
+        candidate?.closePrepared()
         receiver?.stop()
         receiver = null
         expiryJob?.cancelAndJoin()
@@ -210,7 +217,7 @@ class RaspberryPiUdpInputSource(
                             mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = null)
                         }
                         if (active && next.enabled) {
-                            receiver = createReceiver(bindIpv4)
+                            receiver = createReceiver(bindIpv4, next, null)
                             receiver!!.start()
                             activity.bound(monotonicClock.nowNanos())
                         }
@@ -286,10 +293,42 @@ class RaspberryPiUdpInputSource(
     private fun receiveCapacity(candidate: RaspberryPiUdpInputProfile): UdpReceiveCapacity =
         UdpReceiveCapacityCalculator.calculate(38L + candidate.transportLimits.maxChunkPayloadBytes)
 
-    private fun createReceiver(bindIpv4: String): UdpReceiver {
+    internal suspend fun prepareReceiver(
+        candidate: RaspberryPiUdpInputProfile,
+        plan: EffectiveUdpNetworkPlan,
+    ): PreparedUdpReceiver {
+        synchronized(preparedLock) {
+            check(!preparingReceiver && preparedReceiver == null) { "Only one candidate UDP receiver may be prepared" }
+            preparingReceiver = true
+        }
+        val udpReceiver = createReceiver(plan.actualBindIpv4, candidate, plan)
+        return try {
+            val prepared = PreparedUdpReceiver.prepare(udpReceiver) {
+                synchronized(preparedLock) { preparedReceiver = null }
+            }
+            synchronized(preparedLock) {
+                preparingReceiver = false
+                preparedReceiver = prepared
+                maximumPreparedReceiverCount = maxOf(maximumPreparedReceiverCount, 1)
+            }
+            prepared
+        } catch (error: Throwable) {
+            synchronized(preparedLock) { preparingReceiver = false }
+            throw error
+        }
+    }
+
+    val preparedReceiverCount: Int
+        get() = synchronized(preparedLock) { if (preparingReceiver || preparedReceiver != null) 1 else 0 }
+
+    private fun createReceiver(
+        bindIpv4: String,
+        targetProfile: RaspberryPiUdpInputProfile,
+        targetPlan: EffectiveUdpNetworkPlan?,
+    ): UdpReceiver {
         // Legacy receiver configuration is an internal adapter only; the public profile stays single-stream.
-        val receiveProfile = UdpInputProfile(UdpCameraId.A, profile.enabled, profile.raspberryPiIpv4, profile.listenPort,
-            TransportMode.STRUCTURED_CHUNKED, PayloadProfile.Gray8(1, 1), ApplicationFramingProfile(), profile.transportLimits)
+        val receiveProfile = UdpInputProfile(UdpCameraId.A, targetProfile.enabled, null, targetProfile.listenPort,
+            TransportMode.STRUCTURED_CHUNKED, PayloadProfile.Gray8(1, 1), ApplicationFramingProfile(), targetProfile.transportLimits)
         return UdpReceiver(receiveProfile, observer = object : UdpReceiverObserver {
             override fun onReceived(datagram: ReceivedDatagram) = udp.datagramReceived(datagram.size, datagram.metadata())
             override fun onSourceFiltered(datagram: ReceivedDatagram) {
@@ -311,11 +350,11 @@ class RaspberryPiUdpInputSource(
         }, channelFactory = channelFactory, monotonicClock = monotonicClock, epochClock = epochClock,
             dispatcher = dispatcher, envelopeBytes = 4, bindIpv4 = bindIpv4,
             maximumReceiveCapacity = UdpReceiveCapacityCalculator.calculate(38L + 60_000),
-            sourceIpv4s = compileAppliedSourceFilter()) { datagram ->
+            sourceIpv4s = compileSourceFilter(targetProfile, targetPlan)) { datagram ->
             activity.accepted(datagram.receivedAtMonotonicNanos)
             processingLock.withLock {
                 // A datagram may have passed the receiver guard immediately before a limit swap.
-                if (datagram.size > receiveCapacity(profile).acceptedLimit) {
+                if (datagram.size > receiveCapacity(targetProfile).acceptedLimit) {
                     udp.datagramTooLargeOrTruncated()
                     inspectRejected(datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
                     return@withLock
@@ -329,8 +368,11 @@ class RaspberryPiUdpInputSource(
         }
     }
 
-    private fun compileAppliedSourceFilter(): Set<java.net.Inet4Address>? {
-        val configured = appliedNetworkPlan?.resolvedSourceIpv4s ?: return profile.raspberryPiIpv4?.let {
+    private fun compileSourceFilter(
+        targetProfile: RaspberryPiUdpInputProfile,
+        targetPlan: EffectiveUdpNetworkPlan?,
+    ): Set<java.net.Inet4Address>? {
+        val configured = targetPlan?.resolvedSourceIpv4s ?: return targetProfile.raspberryPiIpv4?.let {
             setOf(UdpReceiver.requireIpv4LiteralForConfiguration(it))
         }
         return configured.mapTo(linkedSetOf()) { UdpReceiver.requireIpv4LiteralForConfiguration(it) }
