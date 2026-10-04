@@ -22,7 +22,6 @@ If Err.Number <> 0 Then
 End If
 On Error GoTo 0
 lockStream.WriteLine CStr(Now)
-lockStream.Flush
 
 command = Chr(34) & root & "\start-website.bat" & Chr(34) & " --hidden"
 
