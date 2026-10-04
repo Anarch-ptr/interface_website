@@ -197,7 +197,7 @@ class RaspberryPiUdpInputConfigurationServiceTest {
             assertEquals(ImageInputState.ERROR, f.source.state.value)
             assertEquals(0, f.source.activeReceiverCount)
             assertTrue(task16Failure { f.service.apply(3) } is RaspberryPiUdpConsistencyException)
-            assertTrue(task16Failure { f.service.save(3, f.initial) } is RaspberryPiUdpConsistencyException)
+            assertEquals(4L, f.service.save(3, f.initial).revision)
         } finally { f.close() }
     }
 
@@ -317,7 +317,7 @@ class RaspberryPiUdpInputConfigurationServiceTest {
                 assertEquals("UDP_APPLY_CONSISTENCY_FAILURE", f.source.diagnostics.value.lastError)
                 assertEquals(0, f.source.activeReceiverCount)
                 assertEquals(0, f.channels.count { it.isOpen })
-                assertTrue(task16Failure { f.service.save(3, f.initial) } is RaspberryPiUdpConsistencyException)
+                assertEquals(4L, f.service.save(3, f.initial).revision)
             } finally { f.close() }
         }
     }

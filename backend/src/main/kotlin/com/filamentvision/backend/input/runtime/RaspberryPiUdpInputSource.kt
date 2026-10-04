@@ -5,6 +5,7 @@ import com.filamentvision.backend.input.inspector.PacketInspector
 import com.filamentvision.backend.input.inspector.RawParseStatus
 import com.filamentvision.backend.input.network.BackendIpv4Resolver
 import com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan
+import com.filamentvision.backend.input.network.NetworkConsistencyStatus
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.reassembly.StructuredReassemblyObserver
 import com.filamentvision.backend.input.transport.*
@@ -88,6 +89,9 @@ class RaspberryPiUdpInputSource(
     val activeReceiverCount: Int get() = receiver?.activeReceiverCount ?: 0
     val effectiveProfile: RaspberryPiUdpInputProfile get() = profile
     val effectiveNetworkPlan: EffectiveUdpNetworkPlan? get() = appliedNetworkPlan
+    val networkConsistency: NetworkConsistencyStatus
+        get() = if (consistencyFailure == null) NetworkConsistencyStatus.HEALTHY
+        else NetworkConsistencyStatus.NETWORK_CONFIGURATION_INCONSISTENT
     val receiverCapacity: UdpReceiveCapacity? get() = receiver?.receiveCapacity
     val pendingInputCount: Int get() = synchronized(mailboxLock) { if (pending == null) 0 else 1 }
     val preAdmissionDroppedInputs: Long get() = udp.snapshot().preAdmissionDroppedInputs
@@ -357,8 +361,9 @@ class RaspberryPiUdpInputSource(
 
         // Everything that can fail (validation, compilation, resolution, bind and CAS) is complete.
         // Publication is deliberately kept inside the source lifecycle boundary.
-        withContext(NonCancellable) {
-            processingLock.withLock {
+        try {
+            withContext(NonCancellable) {
+                processingLock.withLock {
                 if (restart || (active && profile.enabled && !next.enabled)) currentReceiver?.stop()
                 profile = next
                 appliedNetworkPlan = plan.immutableCopy()
@@ -385,7 +390,24 @@ class RaspberryPiUdpInputSource(
                     if (active) mutableState.value = ImageInputState.RUNNING
                     synchronized(mailboxLock) { admitting = false }
                 }
+                }
             }
+        } catch (publicationFailure: Throwable) {
+            val fatal = RaspberryPiUdpConsistencyException(
+                publicationFailure,
+                IllegalStateException("UDP_RUNTIME_PUBLICATION_FAILED_AFTER_PERSISTENCE"),
+            )
+            consistencyFailure = fatal
+            withContext(NonCancellable) {
+                try { prepared?.closePrepared() } catch (cleanup: Throwable) { fatal.addSuppressed(cleanup) }
+                try { receiver?.stop() } catch (cleanup: Throwable) { fatal.addSuppressed(cleanup) }
+                receiver = null
+                synchronized(mailboxLock) { admitting = false }
+                activity.reset(false)
+                mutableState.value = ImageInputState.ERROR
+                mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = "NETWORK_CONFIGURATION_INCONSISTENT")
+            }
+            throw fatal
         }
         true
     }

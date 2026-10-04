@@ -221,10 +221,12 @@ internal open class Task16SourceHarness(
     profile: RaspberryPiUdpInputProfile = task16Profile(),
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
     appliedNetworkPlan: EffectiveUdpNetworkPlan? = null,
+    private val allowPreparedCandidate: Boolean = false,
 ) {
     val channels = mutableListOf<Task16Channel>()
     var failNextBind = false
     var failCompilation = false
+    var failNextStop = false
     var onOpen: (Task16Channel) -> Unit = {}
     val source = RaspberryPiUdpInputSource(profile,
         dispatcher = dispatcher,
@@ -232,8 +234,11 @@ internal open class Task16SourceHarness(
             listOf("wifi", "ethernet").map { Ipv4NetworkInterfaceEntry(it, it, "192.0.2.20", true, false, false, true, 1) }
         }),
         channelFactory = UdpChannelFactory {
-            check(channels.none { it.isOpen || it.receiving }) { "Second receiver opened before previous receiver joined" }
-            Task16Channel(failNextBind.also { failNextBind = false }).also { channels += it; onOpen(it) }
+            check(allowPreparedCandidate || channels.none { it.isOpen || it.receiving }) {
+                "Second receiver opened before previous receiver joined"
+            }
+            Task16Channel(failNextBind.also { failNextBind = false }) { failNextStop.also { failNextStop = false } }
+                .also { channels += it; onOpen(it) }
         }, compiledFactory = { p, observer ->
             check(!failCompilation) { "compile failure" }
             CompiledRaspberryPiInputProfile.compile(p, observer)
@@ -253,7 +258,10 @@ internal open class Task16SourceHarness(
     }
 }
 
-internal class Task16Channel(private val failBind: Boolean) : DatagramChannel(SelectorProvider.provider()) {
+internal class Task16Channel(
+    private val failBind: Boolean,
+    private val failClose: () -> Boolean = { false },
+) : DatagramChannel(SelectorProvider.provider()) {
     private val packets = LinkedBlockingQueue<Pair<ByteArray, InetSocketAddress>>()
     private var bound: SocketAddress? = null
     private var delivered = false
@@ -281,7 +289,10 @@ internal class Task16Channel(private val failBind: Boolean) : DatagramChannel(Se
     override fun <T : Any?> setOption(name: SocketOption<T>, value: T): DatagramChannel = this
     override fun <T : Any?> getOption(name: SocketOption<T>): T = throw UnsupportedOperationException()
     override fun supportedOptions(): Set<SocketOption<*>> = emptySet()
-    override fun implCloseSelectableChannel() { packets.offer(byteArrayOf() to InetSocketAddress("127.0.0.1", 1)) }
+    override fun implCloseSelectableChannel() {
+        packets.offer(byteArrayOf() to InetSocketAddress("127.0.0.1", 1))
+        if (failClose()) throw java.io.IOException("injected close failure")
+    }
     override fun implConfigureBlocking(block: Boolean) = Unit
     override fun socket(): DatagramSocket = throw UnsupportedOperationException()
     override fun isConnected() = false

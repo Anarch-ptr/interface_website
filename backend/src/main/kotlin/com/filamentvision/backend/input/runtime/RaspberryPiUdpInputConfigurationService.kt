@@ -18,7 +18,7 @@ class RaspberryPiUdpInputConfigurationService(
     private val planner: EffectiveUdpNetworkPlanner = EffectiveUdpNetworkPlanner(),
     private val clockMillis: () -> Long = System::currentTimeMillis,
 ) {
-    suspend fun save(expectedSavedRevision: Long, profile: RaspberryPiUdpInputProfile): ProfileRevision = router.serialized {
+    suspend fun save(expectedSavedRevision: Long, profile: RaspberryPiUdpInputProfile): ProfileRevision = router.serializedSave {
         val validation = RaspberryPiUdpInputProfileValidator().validate(profile)
         require(validation.isValid) { validation.errors.joinToString { "${it.path}: ${it.message}" } }
         repository.save(expectedSavedRevision, profile)

@@ -2,13 +2,14 @@ package com.filamentvision.backend.input.runtime
 
 import com.filamentvision.backend.input.profile.RaspberryPiUdpInputProfile
 import com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan
+import com.filamentvision.backend.input.network.NetworkConsistencyStatus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /** Compensation failed: further configuration commands must fail closed. */
-class RaspberryPiUdpConsistencyException(cause: Throwable, compensation: Throwable) :
+class RaspberryPiUdpConsistencyException(cause: Throwable, compensation: Throwable? = null) :
     IllegalStateException("UDP_APPLY_CONSISTENCY_FAILURE", cause) {
-    init { addSuppressed(compensation) }
+    init { compensation?.let(::addSuppressed) }
 }
 
 /** One device boundary, shared by every configuration service using this Runtime-owned source. */
@@ -24,11 +25,14 @@ class RaspberryPiUdpInputRouter(
     @Volatile private var appliedPlan: EffectiveUdpNetworkPlan? = initialPlan?.immutableCopy()
     val effectiveNetworkPlan: EffectiveUdpNetworkPlan? get() = appliedPlan
     val resolutionGeneration: Long get() = appliedPlan?.resolutionGeneration ?: 0
+    val networkConsistency: NetworkConsistencyStatus get() = source.networkConsistency
 
     internal suspend fun <T> serialized(action: suspend () -> T): T = serialization.withLock {
         source.checkConsistency()
         action()
     }
+
+    internal suspend fun <T> serializedSave(action: suspend () -> T): T = serialization.withLock { action() }
 
     suspend fun apply(revision: Long, candidate: RaspberryPiUdpInputProfile, persist: suspend () -> Boolean): Boolean =
         serialized { applySerialized(revision, candidate, persist) }
