@@ -1,6 +1,7 @@
 package com.filamentvision.backend.input.runtime
 
 import com.filamentvision.backend.input.profile.RaspberryPiUdpInputProfile
+import com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -14,11 +15,15 @@ class RaspberryPiUdpConsistencyException(cause: Throwable, compensation: Throwab
 class RaspberryPiUdpInputRouter(
     initialRevision: Long,
     private val source: RaspberryPiUdpInputSource,
+    initialPlan: EffectiveUdpNetworkPlan? = source.effectiveNetworkPlan,
 ) {
     private val serialization = Mutex()
     @Volatile var appliedRevision: Long = initialRevision
         private set
     val effectiveProfile: RaspberryPiUdpInputProfile get() = source.effectiveProfile
+    @Volatile private var appliedPlan: EffectiveUdpNetworkPlan? = initialPlan?.immutableCopy()
+    val effectiveNetworkPlan: EffectiveUdpNetworkPlan? get() = appliedPlan
+    val resolutionGeneration: Long get() = appliedPlan?.resolutionGeneration ?: 0
 
     internal suspend fun <T> serialized(action: suspend () -> T): T = serialization.withLock {
         source.checkConsistency()
@@ -46,5 +51,19 @@ class RaspberryPiUdpInputRouter(
         } finally {
             if (!committed) appliedRevision = previousRevision
         }
+    }
+
+    internal suspend fun applyResolvedSerialized(
+        revision: Long,
+        candidate: RaspberryPiUdpInputProfile,
+        plan: EffectiveUdpNetworkPlan,
+        persist: suspend () -> Boolean,
+    ): Boolean {
+        val committed = source.applyResolvedConfiguration(candidate, plan, persist)
+        if (committed) {
+            appliedRevision = revision
+            appliedPlan = plan.immutableCopy()
+        }
+        return committed
     }
 }

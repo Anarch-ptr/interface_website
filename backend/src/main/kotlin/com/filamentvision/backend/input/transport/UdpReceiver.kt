@@ -69,7 +69,7 @@ class UdpReceiver(
     private val consumer: UdpDatagramConsumer,
 ) {
     private val lifecycle = Mutex()
-    private val sourceFilter = Ipv4SourceFilter(sourceIpv4s)
+    @Volatile private var sourceFilter = Ipv4SourceFilter(sourceIpv4s)
     @Volatile var receiveCapacity: UdpReceiveCapacity = UdpReceiveCapacityCalculator.forProfile(profile, envelopeBytes)
         private set
     private val physicalCapacity = maximumReceiveCapacity ?: receiveCapacity
@@ -84,6 +84,11 @@ class UdpReceiver(
         require(capacity == UdpReceiveCapacityCalculator.calculate(capacity.acceptedLimit.toLong()))
         require(capacity.acceptedLimit <= physicalCapacity.acceptedLimit)
         receiveCapacity = capacity
+    }
+
+    /** Atomically replaces the already-resolved applied source set; this never performs DNS. */
+    internal fun updateSourceIpv4s(sourceIpv4s: Set<Inet4Address>?) {
+        sourceFilter = Ipv4SourceFilter(sourceIpv4s)
     }
 
     @Volatile

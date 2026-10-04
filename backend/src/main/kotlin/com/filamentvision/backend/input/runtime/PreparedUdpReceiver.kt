@@ -6,8 +6,8 @@ import kotlinx.coroutines.sync.withLock
 
 /** A bound candidate socket whose receive loop is invisible until [commit]. */
 class PreparedUdpReceiver private constructor(
-    private val receiver: UdpReceiver,
-    private val onClosed: () -> Unit,
+    internal val receiver: UdpReceiver,
+    private val onReleased: () -> Unit,
 ) : AutoCloseable {
     private val lifecycle = Mutex()
     private var closed = false
@@ -20,13 +20,14 @@ class PreparedUdpReceiver private constructor(
         if (committed) return@withLock
         receiver.commit()
         committed = true
+        onReleased()
     }
 
     suspend fun closePrepared() = lifecycle.withLock {
         if (closed) return@withLock
         closed = true
         receiver.stop()
-        onClosed()
+        onReleased()
     }
 
     override fun close() {
@@ -34,9 +35,9 @@ class PreparedUdpReceiver private constructor(
     }
 
     companion object {
-        suspend fun prepare(receiver: UdpReceiver, onClosed: () -> Unit = {}): PreparedUdpReceiver {
+        suspend fun prepare(receiver: UdpReceiver, onReleased: () -> Unit = {}): PreparedUdpReceiver {
             receiver.prepare()
-            return PreparedUdpReceiver(receiver, onClosed)
+            return PreparedUdpReceiver(receiver, onReleased)
         }
     }
 }

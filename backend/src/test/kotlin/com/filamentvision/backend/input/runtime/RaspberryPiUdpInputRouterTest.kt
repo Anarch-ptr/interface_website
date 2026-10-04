@@ -220,6 +220,7 @@ internal suspend fun task16Failure(action: suspend () -> Unit): Throwable {
 internal open class Task16SourceHarness(
     profile: RaspberryPiUdpInputProfile = task16Profile(),
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    appliedNetworkPlan: EffectiveUdpNetworkPlan? = null,
 ) {
     val channels = mutableListOf<Task16Channel>()
     var failNextBind = false
@@ -236,7 +237,7 @@ internal open class Task16SourceHarness(
         }, compiledFactory = { p, observer ->
             check(!failCompilation) { "compile failure" }
             CompiledRaspberryPiInputProfile.compile(p, observer)
-        })
+        }, appliedNetworkPlan = appliedNetworkPlan)
     suspend fun packet(bytes: ByteArray, ip: String = "192.0.2.10") {
         val socket = channels.last()
         val completed = socket.completedReceives.get() + 1

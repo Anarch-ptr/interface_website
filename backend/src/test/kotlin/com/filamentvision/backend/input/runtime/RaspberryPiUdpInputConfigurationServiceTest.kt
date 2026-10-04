@@ -1,6 +1,7 @@
 package com.filamentvision.backend.input.runtime
 
 import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.network.*
 import com.filamentvision.backend.persistence.sqlite.*
 import com.filamentvision.core.input.ImageInputState
 import kotlinx.coroutines.*
@@ -35,6 +36,79 @@ class RaspberryPiUdpInputConfigurationServiceTest {
             assertEquals(1, f.channels.size)
             assertEquals(1L, f.source.totalProducerStarts)
         } finally { f.close() }
+    }
+
+    @Test fun sameRevisionForcedReapplyPublishesFreshResolutionAfterCas() = runBlocking {
+        val now = 10_000L
+        val profile = task16Profile().withNetwork(
+            task16Profile().network.copy(
+                destination = AdvertisedDestinationProfile.Manual("backend.local"),
+                sourceFilter = SourceFilterProfile.IpOrHost("filament-pi.local"),
+            ),
+        )
+        val oldPlan = EffectiveUdpNetworkPlan(
+            actualBindIpv4 = "0.0.0.0",
+            actualBindInterfaceId = null,
+            configuredDestination = "backend.local",
+            resolvedDestinationIpv4 = "192.0.2.20",
+            configuredSource = "filament-pi.local",
+            resolvedSourceIpv4s = setOf("10.97.199.28"),
+            destinationStatus = ResolutionStatus.RESOLVED,
+            sourceStatus = ResolutionStatus.RESOLVED,
+            destinationResolutionTime = now,
+            sourceResolutionTime = now,
+            planCreatedAtEpochMillis = now,
+            appliedAtEpochMillis = now,
+            resolutionGeneration = 4,
+        )
+        val repository = InMemoryResolvedProfileRepository(ProfileRevision(12, profile), oldPlan)
+        var sourceAddress = "10.97.199.42"
+        val resolver = Ipv4HostResolver { host ->
+            HostResolution(
+                host,
+                setOf(if (host == "filament-pi.local") sourceAddress else "192.0.2.20"),
+                HostResolutionStatus.RESOLVED,
+                now + 1,
+            )
+        }
+        val harness = Task16SourceHarness(profile, appliedNetworkPlan = oldPlan)
+        val router = RaspberryPiUdpInputRouter(12, harness.source, oldPlan)
+        val service = RaspberryPiUdpInputConfigurationService(
+            repository,
+            router,
+            resolver,
+            task16Planner(),
+            clockMillis = { now + 2 },
+        )
+        harness.source.start()
+        try {
+            repository.beforeMark = {
+                assertEquals(oldPlan, harness.source.effectiveNetworkPlan)
+                assertEquals(4L, router.resolutionGeneration)
+            }
+            val result = service.apply(
+                revision = 12,
+                forceReapply = true,
+                expectedAppliedRevision = 12,
+                expectedResolutionGeneration = 4,
+            )
+            assertEquals(RaspberryPiUdpApplyOutcome.APPLIED, result.outcome)
+            assertEquals(12L, result.revision)
+            assertEquals(5L, result.resolutionGeneration)
+            assertEquals(12L, repository.state().applied.revision)
+            assertEquals(5L, repository.state().resolutionGeneration)
+            assertEquals(setOf("10.97.199.42"), harness.source.effectiveNetworkPlan!!.resolvedSourceIpv4s)
+            assertEquals("192.0.2.20", harness.source.effectiveNetworkPlan!!.resolvedDestinationIpv4)
+            assertEquals(1, harness.source.activeProducerCount)
+            assertEquals(1, harness.source.activeReceiverCount)
+
+            harness.packet(task16Wire(1, payload = byteArrayOf(7, 8)), "10.97.199.28")
+            assertEquals(1L, harness.source.udpDiagnostics().sourceFilteredDatagrams)
+            harness.packet(task16Wire(2, payload = byteArrayOf(7, 8)), sourceAddress)
+            harness.take().frame.close()
+        } finally {
+            harness.source.stop()
+        }
     }
 
     @Test fun applyAndSaveAcrossServiceInstancesShareTheDeviceSerializationBoundary() = runBlocking {
@@ -296,4 +370,44 @@ class RaspberryPiUdpInputConfigurationServiceTest {
             } else Dispatchers.IO.dispatch(context, block)
         }
     }
+
+    private class InMemoryResolvedProfileRepository(
+        private val revision: ProfileRevision,
+        private var plan: EffectiveUdpNetworkPlan,
+    ) : RaspberryPiUdpInputProfileRepository {
+        var beforeMark: suspend () -> Unit = {}
+
+        override suspend fun save(
+            expectedSavedRevision: Long,
+            profile: RaspberryPiUdpInputProfile,
+        ): ProfileRevision = error("not used")
+
+        override suspend fun markApplied(
+            expectedAppliedRevision: Long,
+            expectedResolutionGeneration: Long,
+            revision: Long,
+            plan: EffectiveUdpNetworkPlan,
+        ): Boolean {
+            beforeMark()
+            if (expectedAppliedRevision != this.revision.revision ||
+                expectedResolutionGeneration != this.plan.resolutionGeneration
+            ) return false
+            this.plan = plan
+            return true
+        }
+
+        override suspend fun state() = RaspberryPiUdpProfileState(
+            saved = revision,
+            applied = revision,
+            appliedPlan = plan,
+            resolutionGeneration = plan.resolutionGeneration,
+        )
+    }
 }
+
+private fun task16Planner() = EffectiveUdpNetworkPlanner(
+    interfaceProvider = Ipv4NetworkInterfaceProvider {
+        listOf(Ipv4NetworkInterfaceEntry("wifi", "Wi-Fi", "192.0.2.20", true, false, false, true, 1))
+    },
+    routeProbe = Ipv4RouteProbe { "192.0.2.20" },
+)

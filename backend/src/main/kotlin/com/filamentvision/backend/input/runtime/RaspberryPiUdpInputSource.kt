@@ -87,6 +87,7 @@ class RaspberryPiUdpInputSource(
 
     val activeReceiverCount: Int get() = receiver?.activeReceiverCount ?: 0
     val effectiveProfile: RaspberryPiUdpInputProfile get() = profile
+    val effectiveNetworkPlan: EffectiveUdpNetworkPlan? get() = appliedNetworkPlan
     val receiverCapacity: UdpReceiveCapacity? get() = receiver?.receiveCapacity
     val pendingInputCount: Int get() = synchronized(mailboxLock) { if (pending == null) 0 else 1 }
     val preAdmissionDroppedInputs: Long get() = udp.snapshot().preAdmissionDroppedInputs
@@ -321,6 +322,74 @@ class RaspberryPiUdpInputSource(
     val preparedReceiverCount: Int
         get() = synchronized(preparedLock) { if (preparingReceiver || preparedReceiver != null) 1 else 0 }
 
+    /**
+     * Stages compilation and any non-overlapping replacement socket while the currently applied
+     * source remains authoritative. [persist] is the transaction boundary: no candidate state is
+     * observable before it returns true, and a false/failed CAS only closes provisional resources.
+     */
+    internal suspend fun applyResolvedConfiguration(
+        candidate: RaspberryPiUdpInputProfile,
+        plan: EffectiveUdpNetworkPlan,
+        persist: suspend () -> Boolean,
+    ): Boolean = lifecycle.withLock {
+        checkConsistency()
+        val compiled = compiledFactory(candidate, reassemblyObserver())
+        val next = compiled.profile
+        val nextProcessor = RaspberryPiUdpProcessor(compiled, decodedPermit, packetInspector)
+        val active = activeProducerCount == 1
+        val currentReceiver = receiver
+        val restart = active && next.enabled && (
+            currentReceiver == null ||
+                profile.listenPort != next.listenPort ||
+                appliedNetworkPlan?.actualBindIpv4 != plan.actualBindIpv4
+            )
+        val prepared = if (restart) prepareReceiver(next, plan) else null
+        val persisted = try {
+            persist()
+        } catch (error: Throwable) {
+            prepared?.closePrepared()
+            throw error
+        }
+        if (!persisted) {
+            prepared?.closePrepared()
+            return@withLock false
+        }
+
+        // Everything that can fail (validation, compilation, resolution, bind and CAS) is complete.
+        // Publication is deliberately kept inside the source lifecycle boundary.
+        withContext(NonCancellable) {
+            processingLock.withLock {
+                if (restart || (active && profile.enabled && !next.enabled)) currentReceiver?.stop()
+                profile = next
+                appliedNetworkPlan = plan.immutableCopy()
+                processor = if (active && next.enabled) nextProcessor else null
+                if (active && next.enabled) {
+                    if (prepared != null) {
+                        receiver = prepared.receiver
+                        prepared.commit()
+                    } else {
+                        currentReceiver?.updateReceiveCapacity(receiveCapacity(next))
+                        currentReceiver?.updateSourceIpv4s(compileSourceFilter(next, plan))
+                        receiver = currentReceiver
+                    }
+                    activity = UdpActivity().also {
+                        it.reset(true)
+                        it.bound(monotonicClock.nowNanos())
+                    }
+                    mutableState.value = ImageInputState.RUNNING
+                    mutableDiagnostics.value = mutableDiagnostics.value.copy(lastError = null)
+                    synchronized(mailboxLock) { admitting = true }
+                } else {
+                    receiver = null
+                    activity = UdpActivity().also { it.reset(false) }
+                    if (active) mutableState.value = ImageInputState.RUNNING
+                    synchronized(mailboxLock) { admitting = false }
+                }
+            }
+        }
+        true
+    }
+
     private fun createReceiver(
         bindIpv4: String,
         targetProfile: RaspberryPiUdpInputProfile,
@@ -354,7 +423,7 @@ class RaspberryPiUdpInputSource(
             activity.accepted(datagram.receivedAtMonotonicNanos)
             processingLock.withLock {
                 // A datagram may have passed the receiver guard immediately before a limit swap.
-                if (datagram.size > receiveCapacity(targetProfile).acceptedLimit) {
+                if (datagram.size > receiveCapacity(profile).acceptedLimit) {
                     udp.datagramTooLargeOrTruncated()
                     inspectRejected(datagram, RawParseStatus.DATAGRAM_TOO_LARGE_OR_TRUNCATED)
                     return@withLock
