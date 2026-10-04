@@ -35,6 +35,14 @@ data class NetworkResolutionPreview(
     val superseded: Boolean = false,
 )
 
+internal data class PreviewBounds(
+    val active: Int,
+    val queued: Int,
+    val retainedResults: Int,
+    val maximumActive: Int,
+    val maximumQueued: Int,
+)
+
 class NetworkResolutionPreviewService(
     private val resolver: Ipv4HostResolver,
     private val planner: EffectiveUdpNetworkPlanner,
@@ -53,6 +61,10 @@ class NetworkResolutionPreviewService(
 
     val maximumActivePreviewCount: Int get() = maxActive.get()
     val maximumQueuedPreviewCount: Int get() = maxQueued.get()
+    internal fun bounds() = synchronized(lock) {
+        PreviewBounds(activeCount.get(), queuedCount.get(), latestResults.size,
+            maximumActivePreviewCount, maximumQueuedPreviewCount)
+    }
 
     suspend fun preview(
         deviceId: String,

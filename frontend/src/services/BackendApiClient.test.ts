@@ -177,13 +177,13 @@ describe('BackendApiClient single-stream contracts', () => {
   it('sends the original draft and preserves backend rejection instead of treating feedback as authority', async () => {
     const draft = profile()
     draft.envelope.headerHex = 'aa01'
-    draft.listenPort = 0
+    draft.network.listenPort = 0
     draft.payload = { format: 'BINARY', width: 3, height: 3, packing: 'BIT_PACKED' }
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: 'INVALID_REQUEST',
-      message: 'Invalid request', correlationId: 'corr', details: { fieldErrors: [{ path: 'listenPort', message: 'Listen port must be between 1 and 65535' }] } }), { status: 400 }))
+      message: 'Invalid request', correlationId: 'corr', details: { fieldErrors: [{ path: 'network.listenPort', message: 'Listen port must be between 1 and 65535' }] } }), { status: 400 }))
     vi.stubGlobal('fetch', fetch)
     await expect(new BackendApiClient('/api/v1', () => 'cmd').saveRaspberryPiUdpConfiguration('pi', draft, 1)).rejects.toMatchObject({
-      fieldErrors: [{ path: 'listenPort', message: 'Listen port must be between 1 and 65535' }],
+      fieldErrors: [{ path: 'network.listenPort', message: 'Listen port must be between 1 and 65535' }],
     })
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ commandId: 'cmd', expectedSavedRevision: 1, configuration: draft })
   })

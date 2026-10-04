@@ -4,6 +4,7 @@ import com.filamentvision.backend.BackendComposition
 import com.filamentvision.backend.application.PageQuery
 import com.filamentvision.backend.simulator.fixtures.*
 import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.network.*
 import com.filamentvision.backend.input.runtime.*
 import com.filamentvision.backend.input.decoder.*
 import com.filamentvision.backend.input.reassembly.*
@@ -91,7 +92,9 @@ class LongRunBoundednessTest {
                 val calibration = baseline.vision.calibration.copy(roiLeft = 1000, roiTop = 700,
                     roiRight = 1640, roiBottom = 1180, maximumPixelWidth = 300, mmPerPixel = .01)
                 c.application.saveAndApply(c.deviceId, "8mp-config", baseline.copy(vision = VisionConfiguration(calibration)))
-                val profile = RaspberryPiUdpInputProfile.defaults().copy(enabled = true, listenPort = port,
+                val udpDefaults = RaspberryPiUdpInputProfile.defaults()
+                val profile = udpDefaults.copy(enabled = true, network = udpDefaults.network.copy(
+                    destination = AdvertisedDestinationProfile.Manual("127.0.0.1"), listenPort = port),
                     payload = if (jpeg) ImagePayloadProfile.Jpeg(16 * 1024 * 1024, width, height)
                         else ImagePayloadProfile.Rgb888(width, height, RgbChannelOrder.RGB),
                     transportLimits = TransportLimits(2, 32 * 1024 * 1024, 10000, 32768, 60000))
@@ -290,8 +293,10 @@ class LongRunBoundednessTest {
         val source = c.inputSource as RaspberryPiUdpInputSource
         val service = checkNotNull(c.udpInputService)
         try {
-            var profile = RaspberryPiUdpInputProfile.defaults().copy(enabled = true,
-                listenPort = DatagramSocket(0).use { it.localPort })
+            val udpDefaults = RaspberryPiUdpInputProfile.defaults()
+            var profile = udpDefaults.copy(enabled = true, network = udpDefaults.network.copy(
+                destination = AdvertisedDestinationProfile.Manual("127.0.0.1"),
+                listenPort = DatagramSocket(0).use { it.localPort }))
             var saved = service.save(1, profile)
             service.apply(saved.revision)
             repeat(16) { cycle ->
@@ -313,5 +318,104 @@ class LongRunBoundednessTest {
             assertEquals(16L, source.totalProducerStarts)
             assertEquals(1, c.runtime.state.value.maximumActiveProducerCount)
         } finally { c.close() }
+    }
+
+    @Test fun flexibleNetworkPreviewReapplyAndFailuresRemainBounded() = runBlocking {
+        val lookupAnswers = AtomicReference(listOf("127.0.0.1"))
+        val resolver = HostResolver(HostLookup {
+            Thread.sleep(10)
+            lookupAnswers.get()
+        }, timeoutMillis = 1_000)
+        val planner = EffectiveUdpNetworkPlanner(Ipv4NetworkInterfaceProvider { emptyList() }, Ipv4RouteProbe { null })
+        val previewService = NetworkResolutionPreviewService(resolver, planner, minimumStartIntervalMillis = 0)
+        val port = DatagramSocket(0).use { it.localPort }
+        val defaults = RaspberryPiUdpInputProfile.defaults()
+        val profile = defaults.copy(enabled = true, network = defaults.network.copy(
+            destination = AdvertisedDestinationProfile.Manual("backend.local"), listenPort = port),
+            payload = ImagePayloadProfile.Gray8(48, 8),
+            transportLimits = TransportLimits(2, 1024, 500, 16, 128))
+        try {
+            coroutineScope {
+                (1..100).map {
+                    async {
+                        previewService.preview("filamentvision-1",
+                            PreviewProfile(true, profile.network, 1, 1), null)
+                    }
+                }.awaitAll()
+            }
+            val resolverPreviewBounds = resolver.bounds()
+            val previewBounds = previewService.bounds()
+            assertTrue(resolverPreviewBounds.maximumActiveLookups <= 2)
+            assertTrue(resolverPreviewBounds.maximumQueuedLookups <= 2)
+            assertEquals(0, resolverPreviewBounds.retainedResults)
+            assertTrue(previewBounds.maximumActive <= 1)
+            assertTrue(previewBounds.maximumQueued <= 1)
+            assertEquals(1, previewBounds.retainedResults)
+
+            val c = BackendComposition.open(temporary.root.toPath().resolve("flexible-bounds.db"),
+                temporary.root.toPath().resolve("flexible-bounds-objects"))
+            val source = c.inputSource as RaspberryPiUdpInputSource
+            val service = RaspberryPiUdpInputConfigurationService(c.udpProfileRepository,
+                checkNotNull(c.udpInputRouter), resolver, planner)
+            try {
+                var saved = service.save(c.udpProfileRepository.state().saved.revision, profile)
+                assertEquals(RaspberryPiUdpApplyOutcome.APPLIED,
+                    service.apply(saved.revision, forceReapply = true).outcome)
+                c.application.start(c.deviceId, "bounded-start", null, null)
+
+                val restarted = profile.copy(network = profile.network.copy(
+                    listenPort = DatagramSocket(0).use { it.localPort }))
+                saved = service.save(saved.revision, restarted)
+                assertEquals(RaspberryPiUdpApplyOutcome.APPLIED, service.apply(saved.revision).outcome)
+                repeat(25) {
+                    val state = c.udpProfileRepository.state()
+                    assertEquals(RaspberryPiUdpApplyOutcome.APPLIED,
+                        service.apply(saved.revision, forceReapply = true,
+                            expectedAppliedRevision = state.applied.revision,
+                            expectedResolutionGeneration = state.resolutionGeneration).outcome)
+                }
+                repeat(50) {
+                    val state = c.udpProfileRepository.state()
+                    assertEquals(RaspberryPiUdpApplyOutcome.CONFLICT,
+                        service.apply(saved.revision, forceReapply = true,
+                            expectedAppliedRevision = state.applied.revision,
+                            expectedResolutionGeneration = state.resolutionGeneration - 1).outcome)
+                }
+
+                val beforeResolutionFailure = c.udpProfileRepository.state()
+                lookupAnswers.set(emptyList())
+                val resolutionFailure = service.apply(saved.revision, forceReapply = true,
+                    expectedAppliedRevision = beforeResolutionFailure.applied.revision,
+                    expectedResolutionGeneration = beforeResolutionFailure.resolutionGeneration)
+                assertEquals(RaspberryPiUdpApplyOutcome.INVALID, resolutionFailure.outcome)
+                assertEquals(beforeResolutionFailure, c.udpProfileRepository.state())
+                lookupAnswers.set(listOf("127.0.0.1"))
+
+                DatagramSocket(0).use { occupied ->
+                    val failed = restarted.copy(network = restarted.network.copy(listenPort = occupied.localPort))
+                    val failedSaved = service.save(saved.revision, failed)
+                    assertTrue(runCatching { service.apply(failedSaved.revision) }.isFailure)
+                }
+                val sourceBounds = source.bounds()
+                assertTrue(sourceBounds.maximumActiveProducers <= 1)
+                assertTrue(sourceBounds.maximumCommittedReceivers <= 1)
+                assertTrue(sourceBounds.maximumProvisionalReceivers <= 1)
+                assertEquals(1, sourceBounds.committedReceivers)
+                assertEquals(0, sourceBounds.provisionalReceivers)
+                assertTrue(sourceBounds.mailboxEntries <= 1)
+                assertTrue(source.packetInspector.retainedPreviewBytes <= 512)
+                println("FLEX_NETWORK_BOUNDS resolverActive=${resolverPreviewBounds.maximumActiveLookups} " +
+                    "resolverQueued=${resolverPreviewBounds.maximumQueuedLookups} previewActive=${previewBounds.maximumActive} " +
+                    "previewQueued=${previewBounds.maximumQueued} previewRetained=${previewBounds.retainedResults} " +
+                    "committed=${sourceBounds.maximumCommittedReceivers} provisional=${sourceBounds.maximumProvisionalReceivers} " +
+                    "producer=${sourceBounds.maximumActiveProducers} mailbox=${sourceBounds.mailboxEntries}")
+                c.application.stop(c.deviceId, "bounded-stop")
+                assertEquals(0, source.activeProducerCount)
+                assertEquals(0, source.activeReceiverCount)
+            } finally { c.close() }
+        } finally {
+            previewService.close()
+            resolver.close()
+        }
     }
 }

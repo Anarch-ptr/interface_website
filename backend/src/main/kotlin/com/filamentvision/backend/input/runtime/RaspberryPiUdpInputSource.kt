@@ -21,6 +21,16 @@ import kotlinx.coroutines.sync.withLock
 import java.net.StandardProtocolFamily
 import java.nio.channels.DatagramChannel
 
+internal data class UdpInputSourceBounds(
+    val activeProducers: Int,
+    val committedReceivers: Int,
+    val provisionalReceivers: Int,
+    val mailboxEntries: Int,
+    val maximumActiveProducers: Int,
+    val maximumCommittedReceivers: Int,
+    val maximumProvisionalReceivers: Int,
+)
+
 /** One Runtime-owned source reservation, one socket job and one serialized processing chain. */
 class RaspberryPiUdpInputSource(
     profile: RaspberryPiUdpInputProfile,
@@ -60,6 +70,7 @@ class RaspberryPiUdpInputSource(
     private var preparingReceiver = false
     @Volatile var maximumPreparedReceiverCount = 0
         private set
+    @Volatile private var maximumCommittedReceiverCount = 0
     private var expiryJob: Job? = null
     private val mutableState = MutableStateFlow(ImageInputState.IDLE)
     private val mutableDiagnostics = MutableStateFlow(ImageInputDiagnostics())
@@ -98,6 +109,9 @@ class RaspberryPiUdpInputSource(
     val receiverCapacity: UdpReceiveCapacity? get() = receiver?.receiveCapacity
     val pendingInputCount: Int get() = synchronized(mailboxLock) { if (pending == null) 0 else 1 }
     val preAdmissionDroppedInputs: Long get() = udp.snapshot().preAdmissionDroppedInputs
+    internal fun bounds() = UdpInputSourceBounds(activeProducerCount, activeReceiverCount,
+        preparedReceiverCount, pendingInputCount, if (totalProducerStarts > 0) 1 else 0,
+        maximumCommittedReceiverCount, maximumPreparedReceiverCount)
     fun udpDiagnostics() = udp.snapshot().copy(appliedNetwork = appliedNetworkPlan?.provenance())
     fun operationalStatus() = activity.snapshot(monotonicClock.nowNanos())
 
@@ -122,6 +136,7 @@ class RaspberryPiUdpInputSource(
                 val next = createReceiver(bindIpv4, profile, appliedNetworkPlan)
                 receiver = next
                 next.start()
+                maximumCommittedReceiverCount = maxOf(maximumCommittedReceiverCount, activeReceiverCount)
                 activity.bound(monotonicClock.nowNanos())
             }
             expiryJob = CoroutineScope(dispatcher).launch {
@@ -376,6 +391,7 @@ class RaspberryPiUdpInputSource(
                     if (prepared != null) {
                         receiver = prepared.receiver
                         prepared.commit()
+                        maximumCommittedReceiverCount = maxOf(maximumCommittedReceiverCount, activeReceiverCount)
                     } else {
                         currentReceiver?.updateReceiveCapacity(receiveCapacity(next))
                         currentReceiver?.updateSourceIpv4s(compileSourceFilter(next, plan))

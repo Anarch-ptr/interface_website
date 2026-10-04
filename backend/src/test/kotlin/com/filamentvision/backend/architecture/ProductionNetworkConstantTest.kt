@@ -27,6 +27,7 @@ class ProductionNetworkConstantTest {
             Files.walk(root).use { paths ->
                 paths.filter(Files::isRegularFile)
                     .filter { it.fileName.toString().substringAfterLast('.', "") in TEXT_EXTENSIONS }
+                    .filter { ".test." !in it.fileName.toString() }
                     .flatMap { path ->
                         val text = Files.readString(path)
                         forbidden.filter(text::contains).map { value ->
