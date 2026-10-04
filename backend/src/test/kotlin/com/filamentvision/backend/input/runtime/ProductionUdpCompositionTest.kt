@@ -5,6 +5,7 @@ import com.filamentvision.backend.parseBackendOptions
 import com.filamentvision.backend.application.*
 import com.filamentvision.backend.input.profile.RaspberryPiUdpInputProfile
 import com.filamentvision.backend.input.profile.copy
+import com.filamentvision.backend.input.profile.AdvertisedDestinationProfile
 import com.filamentvision.backend.simulator.fixtures.*
 import com.filamentvision.core.frame.CameraId
 import com.filamentvision.core.runtime.StartOutcome
@@ -87,6 +88,10 @@ class ProductionUdpCompositionTest {
             dispatcher = Dispatchers.Default, monotonicMillis = now::get)
         val source = c.inputSource as RaspberryPiUdpInputSource
         val profile = RaspberryPiUdpInputProfile.defaults().copy(enabled = true, listenPort = port)
+            .withNetwork(RaspberryPiUdpInputProfile.defaults().network.copy(
+                destination = AdvertisedDestinationProfile.Manual("127.0.0.1"),
+                listenPort = port,
+            ))
         val service = checkNotNull(c.udpInputService)
         val saved = service.save(1, profile)
         assertEquals(RaspberryPiUdpApplyOutcome.APPLIED, service.apply(saved.revision).outcome)
@@ -109,8 +114,12 @@ class ProductionUdpCompositionTest {
         val reopened = BackendComposition.open(path("restore.db"), path("restore-objects-2"))
         try {
             assertEquals(saved.revision, checkNotNull(reopened.udpInputRouter).appliedRevision)
-            assertEquals(profile, (reopened.inputSource as RaspberryPiUdpInputSource).effectiveProfile)
+            val reopenedSource = reopened.inputSource as RaspberryPiUdpInputSource
+            assertEquals(profile, reopenedSource.effectiveProfile)
             assertEquals(saved.revision, reopened.udpProfileRepository.state().applied.revision)
+            assertEquals(reopened.udpProfileRepository.state().appliedPlan, reopenedSource.effectiveNetworkPlan)
+            assertEquals(reopened.udpProfileRepository.state().resolutionGeneration,
+                checkNotNull(reopened.udpInputRouter).resolutionGeneration)
         } finally { reopened.close() }
     }
 

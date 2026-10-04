@@ -217,11 +217,23 @@ class BackendComposition private constructor(
                 val r = SqliteRepositories(db)
                 val initial = r.revisions().appliedRevision?.let(r::configuration) ?: r.saveConfiguration(defaultConfiguration()).also { r.markApplied(it.revision, it.revision) }
                 val udpRepository = SqliteRaspberryPiUdpInputProfileRepository(db)
-                val udpApplied = udpRepository.state().applied
-                val inputSource = inputSourceFactory.create(scope, dispatcher, epochMillis,
-                    { monotonicMillis() * 1_000_000 }, udpApplied.profile)
+                val udpState = udpRepository.state()
+                val udpApplied = udpState.applied
+                val inputSource = if (inputSourceFactory === ProductionUdpInputSourceFactory) {
+                    RaspberryPiUdpInputSource(
+                        udpApplied.profile,
+                        monotonicClock = com.filamentvision.backend.input.transport.MonotonicClock {
+                            monotonicMillis() * 1_000_000
+                        },
+                        epochClock = com.filamentvision.backend.input.transport.EpochClock(epochMillis),
+                        appliedNetworkPlan = udpState.appliedPlan,
+                    )
+                } else {
+                    inputSourceFactory.create(scope, dispatcher, epochMillis,
+                        { monotonicMillis() * 1_000_000 }, udpApplied.profile)
+                }
                 val udpRouter = (inputSource as? RaspberryPiUdpInputSource)?.let {
-                    RaspberryPiUdpInputRouter(udpApplied.revision, it)
+                    RaspberryPiUdpInputRouter(udpApplied.revision, it, udpState.appliedPlan)
                 }
                 BackendComposition(db, r, udpRepository, udpRouter, inputSource,
                     FileSnapshotObjectStore(snapshotRoot), scope, ioDispatcher, epochMillis, monotonicMillis, initial, r.revisions())
