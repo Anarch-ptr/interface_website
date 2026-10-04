@@ -82,6 +82,26 @@ describe('single Packet Inspector', () => {
     expect(await screen.findByText('18446744073709551615')).toBeVisible(); expect(screen.getByText(/GRAY8 · 2 × 1 · Completed frame bytes: 2/)).toBeVisible(); expect(screen.getByText(/Actual footer: 0D 0A · Expected footer: 0D 0A · Matched/)).toBeVisible()
     expect(fetch.mock.calls[0][0]).toBe('/api/v1/devices/pi/packet-inspector/lease')
   })
+  it('shows the immutable applied network provenance captured with the bounded Datagram snapshot', async () => {
+    const { api, fetch } = fixture(); const user = userEvent.setup()
+    const snapshot = inspectorSnapshot()
+    snapshot.rawDatagram.appliedNetwork = {
+      actualBindIpv4: '0.0.0.0', actualBindInterfaceId: null,
+      configuredDestination: 'backend.local', resolvedDestinationIpv4: '10.97.199.20',
+      configuredSource: 'filament-pi.local', resolvedSourceIpv4s: ['10.97.199.28', '10.97.199.42'],
+      resolutionGeneration: 7, planCreatedAtEpochMillis: 100, appliedAtEpochMillis: 200,
+    }
+    fetch.mockResolvedValueOnce(apiResponse({ leaseId: 'network', previewBytes: 128, expiresAtMillis: 9999 }))
+      .mockResolvedValueOnce(apiResponse(snapshot, 200, '"1"'))
+
+    render(<PacketInspector api={api} deviceId="pi" />)
+    await user.click(screen.getByRole('button', { name: 'Inspect Packet' }))
+    const applied = await screen.findByRole('region', { name: 'Applied Network' })
+    expect(applied).toHaveTextContent('backend.local → 10.97.199.20')
+    expect(applied).toHaveTextContent('filament-pi.local → 10.97.199.28, 10.97.199.42')
+    expect(applied).toHaveTextContent('Generation 7')
+    expect(applied).toHaveTextContent('Actual sender 192.168.1.4:6000')
+  })
   it('never overlaps a slow poll and aborts it when closed', async () => {
     const { api, fetch } = fixture(); const user = userEvent.setup()
     fetch.mockResolvedValueOnce(apiResponse({ leaseId: 'slow', previewBytes: 128, expiresAtMillis: 9999 })).mockImplementationOnce(() => new Promise(() => undefined))

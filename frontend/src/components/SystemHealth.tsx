@@ -9,6 +9,11 @@ const statusLabels: Record<UdpOperationalStatus, string> = {
   RECEIVING: 'Receiving UDP packets', NO_PACKETS_RECENTLY: 'No UDP packets recently',
   SOURCE_IP_MISMATCH: 'Unexpected Raspberry Pi source IP', BIND_FAILED: 'UDP bind failed',
 }
+const consistencyLabels: Record<string, string> = {
+  NETWORK_CONFIGURATION_INCONSISTENT: 'Network configuration inconsistent',
+  LEGACY_PLAN_REAPPLY_REQUIRED: 'Legacy UDP plan requires Apply',
+  REAPPLY_REQUIRED: 'UDP resolution changed; Re-Apply required',
+}
 
 export function SystemHealth({ live, api = defaultApi }: { live: LiveMonitoringSnapshot; api?: BackendApiClient }) {
   const [diagnostics, setDiagnostics] = useState<UdpDiagnostics | null>(null)
@@ -28,9 +33,13 @@ export function SystemHealth({ live, api = defaultApi }: { live: LiveMonitoringS
   const monitoring = live.backendState?.monitoring ?? 'Awaiting Backend state'
   const connection = live.visionSourceState === 'ERROR' ? 'Backend observer unavailable' :
     live.backendState?.connection ?? 'Awaiting Backend state'
+  const udpLabel = diagnostics
+    ? consistencyLabels[diagnostics.statusDetail ?? ''] ?? statusLabels[diagnostics.status] ?? 'UDP status unavailable'
+    : 'UDP status unavailable'
+  const recognizedConsistency = diagnostics?.statusDetail ? consistencyLabels[diagnostics.statusDetail] : undefined
 
   return <section className="health-strip" aria-label="System health">
-    <div className="health-item udp-status" role="status"><div><span>Raspberry Pi UDP</span><strong>{diagnostics ? statusLabels[diagnostics.status] ?? 'UDP status unavailable' : 'UDP status unavailable'}</strong>{diagnostics?.statusDetail && <small>{diagnostics.statusDetail}</small>}</div></div>
+    <div className="health-item udp-status" role="status"><div><span>Raspberry Pi UDP</span><strong>{udpLabel}</strong>{diagnostics?.statusDetail && !recognizedConsistency && <small>{diagnostics.statusDetail}</small>}</div></div>
     <HealthItem label="Backend connection" value={connection} healthy="CONNECTED" />
     <HealthItem label="Monitoring" value={monitoring} healthy="RUNNING" />
     <HealthItem label="Measurement quality" value={live.latestBackendReading?.status.replaceAll('_', ' ') ?? 'Waiting for Raspberry Pi'} healthy="NORMAL" />

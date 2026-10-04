@@ -70,4 +70,19 @@ describe('SystemHealth UDP status', () => {
     expect(screen.getByText('UDP status unavailable')).toBeVisible()
     expect(screen.queryByText('Receiving UDP packets')).not.toBeInTheDocument()
   })
+
+  it.each([
+    ['NETWORK_CONFIGURATION_INCONSISTENT', 'Network configuration inconsistent'],
+    ['LEGACY_PLAN_REAPPLY_REQUIRED', 'Legacy UDP plan requires Apply'],
+    ['REAPPLY_REQUIRED', 'UDP resolution changed; Re-Apply required'],
+  ])('prioritizes fail-closed/reapply status %s over ordinary operational readiness', async (statusDetail, label) => {
+    const api = new class extends BackendApiClient {
+      override async getRaspberryPiUdpDiagnostics() {
+        return { ...udpDiagnostics, status: 'UDP_READY' as const, statusDetail }
+      }
+    }()
+    render(<SystemHealth live={live()} api={api} />)
+    expect(await screen.findByText(label)).toBeVisible()
+    expect(screen.queryByText('UDP ready')).not.toBeInTheDocument()
+  })
 })

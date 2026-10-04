@@ -83,6 +83,7 @@ export function PacketInspector({ api, deviceId }: { api: BackendApiClient; devi
         <p>Actual footer: {raw.footerHex ?? 'Unavailable'} · Expected footer: {raw.expectedFooterHex} · {match(raw.footerMatched)}</p>
         <p>Bounded preview of the complete datagram, including envelope bytes when within the preview limit.</p>
       </InspectorRegion>
+      <AppliedNetworkRegion network={raw.appliedNetwork} sourceIpv4={raw.sourceIpv4} sourcePort={raw.sourcePort} />
       <InspectorRegion title="Structured Transport" status={transport?.status ?? 'Not parsed'} hex={transport?.hexPreview ?? ''}>
         {transport ? <dl className="udp-diagnostics">{Object.entries(transport).filter(([key]) => key !== 'hexPreview' && key !== 'status').map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl> : <p>No parsed structured header; boundary or source mismatch can prevent parsing.</p>}
       </InspectorRegion>
@@ -92,6 +93,20 @@ export function PacketInspector({ api, deviceId }: { api: BackendApiClient; devi
       <div className="inspector-actions"><button type="button" onClick={() => void copy(false)}>Copy Hex</button><button type="button" onClick={() => void copy(true)}>Copy Debug Info</button></div>
     </> : <p className="udp-muted">Waiting for UDP Datagram…</p>}
     {error && <p className="field-error" role="alert">{error}</p>}
+  </section>
+}
+
+function AppliedNetworkRegion({ network, sourceIpv4, sourcePort }: {
+  network: InspectorSnapshot['rawDatagram']['appliedNetwork']; sourceIpv4: string; sourcePort: number
+}) {
+  return <section className="inspector-region" aria-label="Applied Network"><h4>Applied Network</h4>
+    {network ? <>
+      <p>Destination: {network.configuredDestination ?? 'AUTO'} → {network.resolvedDestinationIpv4 ?? 'Inactive'}</p>
+      <p>Bind: {network.actualBindIpv4} · {network.actualBindInterfaceId ?? 'all IPv4 interfaces'}</p>
+      <p>Source: {network.configuredSource ?? 'ANY'} → {network.resolvedSourceIpv4s.join(', ') || 'Any IPv4 sender'}</p>
+      <p>Generation {network.resolutionGeneration} · Applied {network.appliedAtEpochMillis === null ? 'time unavailable' : new Date(network.appliedAtEpochMillis).toISOString()}</p>
+    </> : <p>No applied network provenance captured.</p>}
+    <p>Actual sender {sourceIpv4}:{sourcePort}</p>
   </section>
 }
 
