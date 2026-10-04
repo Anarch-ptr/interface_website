@@ -134,15 +134,17 @@ data class EffectiveUdpNetworkPlan(
 )
 ```
 
-The successful plan is immutable and persisted with its applied revision. Receiver configuration, source filtering, diagnostics and Inspector use only this plan. They do not re-resolve DNS while running. Initial migrated INACTIVE state uses generation 0; every successful Apply of a different saved revision stores `previousGeneration + 1`. Failed Apply and idempotent Apply do not consume a generation.
+The successful plan is immutable and persisted with its applied revision. Receiver configuration, source filtering, diagnostics and Inspector use only this plan. They do not re-resolve DNS while running. Configuration revision and resolution generation are independent: saved/applied revision identifies user intent, while `resolutionGeneration` identifies a successful resolution and application of that intent. Initial migrated INACTIVE state uses generation 0. Every successful Apply that constructs and commits a new plan stores `previousGeneration + 1`, including an explicit same-revision Re-Apply. Failed Apply and a same-revision request without re-resolution intent do not consume a generation.
 
-Each HostResolution owns its resolution timestamp. `planCreatedAtEpochMillis` means candidate plan construction completion. `appliedAtEpochMillis` is captured immediately before the successful SQLite CAS transaction and persisted in that transaction; a failed transaction's timestamp is discarded. Neither timestamp is a DNS TTL. `resolutionGeneration` increases only on a successful Apply that commits a new plan; repeated idempotent Apply of the same applied revision returns the existing plan without resolving again.
+Each HostResolution owns its resolution timestamp. `planCreatedAtEpochMillis` means candidate plan construction completion. `appliedAtEpochMillis` is captured immediately before the successful SQLite CAS transaction and persisted in that transaction; a failed transaction's timestamp is discarded. Neither timestamp is a DNS TTL. A normal same-revision Apply with `forceReapply=false` is an idempotent no-op. A same-revision Apply with `forceReapply=true` performs resolution, planning, candidate preparation, CAS and publication again and increments generation only on success.
 
 Enabled profiles require a complete runnable plan and a unique destination. Disabled profiles create an INACTIVE plan: no receiver, destination/source status `NOT_REQUIRED`, and DNS/interface availability does not block Apply.
 
 ## 8. Applied resolution versus preview
 
 `NetworkResolutionPreview` is a read-only snapshot containing configured values, current destination candidates, current source set, interfaces, route-selected candidate, warnings, differences from the applied plan, and preview timestamps. Resolve/Refresh may report `RESOLUTION_CHANGED` and `REAPPLY_REQUIRED` but must not Save, Apply, restart a socket, alter source filtering, publish runtime state, update UDP diagnostics/Inspector/Last Packet, or change a revision.
+
+When preview reports `REAPPLY_REQUIRED`, the UI enables Apply even when saved and applied revision are equal and sends `forceReapply=true` with the currently observed applied revision and resolution generation. A successful Re-Apply keeps saved/applied revision unchanged, increments generation, replaces the effective plan/receiver, and a subsequent preview no longer reports a difference. The user never needs to create a fake configuration revision for a DNS-only change.
 
 On process restart the persisted plan is authoritative. A non-destructive preview may reveal changed DNS; the old plan continues running and UI shows `REAPPLY_REQUIRED`. If its persisted bind/interface is no longer usable, receiver startup fails with the exact interface/bind diagnostic; Backend does not substitute or re-resolve.
 
@@ -168,9 +170,11 @@ atomically publish runtime profile + plan
 start/publish the committed receive loop
 ```
 
+The Apply command carries `expectedSavedRevision`, `expectedAppliedRevision`, `expectedResolutionGeneration`, and `forceReapply`. Applying a different saved revision always builds a plan. Applying the same revision builds a plan only when `forceReapply=true`; otherwise it returns the existing result as an idempotent no-op. The repository CAS compares all three expected values and writes the plan plus the next generation atomically. Concurrent same-revision Re-Apply attempts cannot overwrite each other: one commits, the other receives conflict and restores/discards its candidate.
+
 `PreparedUdpReceiver` is private provisional state. Before the repository commit it cannot update MonitoringRuntime admission, production UDP counters, Packet Inspector, last packet/sender, operational status, measurements, alarms or sessions. The preferred implementation binds without starting the receive loop. If a platform forces early receive, bytes remain in a bounded private provisional buffer/counter and are discarded on both commit and rollback; they are never replayed.
 
-Wildcard and specific sockets on the same port may not coexist. A controlled swap may briefly stop the old socket, attempt candidate bind, and restore the old socket on failure while the old persisted plan remains authoritative. Resolution, interface, bind, CAS or persistence failure stops the candidate and restores the old receiver/profile/plan/revision. No state may expose a new receiver with an old revision or vice versa.
+Wildcard and specific sockets on the same port may not coexist. A controlled swap may briefly stop the old socket, attempt candidate bind, and restore the old socket on failure while the old persisted plan remains authoritative. Resolution, interface, bind, CAS or persistence failure stops the candidate and restores the old receiver/profile/plan/revision/generation. No state may expose a new receiver with an old plan identity or a new plan identity with an old receiver.
 
 If compensation cannot restore the old receiver, runtime enters `NETWORK_CONFIGURATION_INCONSISTENT`. Persisted revision/plan remain the last committed fact, but the UI must not claim they are running. Save remains allowed; Apply is rejected until explicit process restart/recovery. This is not `BIND_FAILED`.
 
@@ -311,7 +315,7 @@ Profile/hostname tests cover IPv4, single-label and `.local` hostname syntax, no
 
 Network planning tests cover both wildcard modes, stable interface identity, removed/down/address-changed interface, manual local IP, Wi-Fi/Ethernet/VPN candidates, route convergence, route disagreement, zero/one/multiple candidates, different subnet warning, disabled INACTIVE plan and timestamp provenance.
 
-Apply tests cover Save while offline, preview immutability, hostname change, bind change, parser-only change, idempotent Apply, bind failure rollback, resolution failure rollback, CAS race, persistence exception, candidate invisibility, old receiver restoration, compensation failure fail-closed, restart from persisted plan, and A/B legacy infrastructure remaining unused.
+Apply tests cover Save while offline, preview immutability, hostname change, bind change, parser-only change, same-revision no-op without force, same-revision forced Re-Apply with generation advance, bind failure rollback, resolution failure rollback, revision/generation CAS races, persistence exception, candidate invisibility, old receiver restoration, compensation failure fail-closed, restart from persisted plan, and A/B legacy infrastructure remaining unused.
 
 Persistence tests cover codec v1->v2 mapping, v2 round trip, plan codec bounds, V004->V005 migration for enabled/disabled legacy state, atomic revision+plan CAS, reopen, corrupt data and migration rollback.
 

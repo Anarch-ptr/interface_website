@@ -6,7 +6,7 @@
 
 **Architecture:** Replace the coupled interface/source fields with `UdpNetworkProfile`, resolve configuration-plane hostnames through one injected `HostResolver`, and commit an immutable `EffectiveUdpNetworkPlan` with the applied revision. A prepared receiver remains invisible until commit; preview, diagnostics and Settings distinguish current DNS from applied receiver facts.
 
-**Tech Stack:** Kotlin/JVM 21, coroutines, Ktor, SQLite JDBC, JUnit 5, React 19, TypeScript, Vitest, Testing Library, Vite.
+**Tech Stack:** Kotlin 2.2.10 with Gradle JVM toolchain 21 but production JVM bytecode/release target 17, coroutines, Ktor, SQLite JDBC, JUnit 4.13.2 via `useJUnit()`, React 19, TypeScript, Vitest, Testing Library, Vite. This delta does not migrate toolchain, bytecode target or test framework.
 
 **Spec:** `docs/superpowers/specs/2026-10-04-flexible-udp-network-configuration-design.md`
 
@@ -22,6 +22,7 @@
 - Runtime profile, effective receiver, persisted applied revision and persisted effective plan must remain consistent.
 - `activeProducerCount <= 1`, committed receiver jobs <= 1, provisional receivers <= 1, mailbox <= 1 and existing Inspector bounds remain authoritative.
 - No production address, hostname or port is derived from test examples.
+- Preserve the repository's existing production UDP default `RaspberryPiUdpInputProfile.defaults().listenPort == 5_000`; the value remains editable and tests use dynamic or explicit fixture ports.
 - Every production task (Tasks 2-20) follows RED -> verify expected failure -> minimal GREEN -> focused tests -> listed regressions -> `git diff --check` -> `git diff --stat` -> independent commit. Task 1 is the characterization baseline and must pass before production work.
 - Do not advance after a focused or regression failure, a wire-format change, a golden mismatch, an unbounded ownership path, or an atomicity invariant failure.
 
@@ -87,7 +88,7 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 
 **Interfaces:**
 - Produces `UdpNetworkProfile`, `BindProfile`, `AdvertisedDestinationProfile`, `SourceFilterProfile`, `normalizeHostOrIpv4(String): String`, and field-path validation errors.
-- Default profile is disabled/AUTO/AUTO/ANY with editable port 5000.
+- Default profile is disabled/AUTO/AUTO/ANY and preserves the existing editable default port returned by `RaspberryPiUdpInputProfile.defaults()`; this task must not introduce a new port default.
 
 - [ ] Write failing tests for all four bind modes, both destination modes, both source modes, canonical IPv4, hostname/single-label/`.local` normalization, invalid scheme/port/space/label/length, IPv6 rejection and mode-specific required fields.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.profile.UdpNetworkProfileValidatorTest"`; expect compile failure because the types do not exist.
@@ -137,10 +138,10 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 - Create: `backend/src/test/kotlin/com/filamentvision/backend/input/network/NetworkResolutionPreviewServiceTest.kt`
 
 **Interfaces:**
-- Produces immutable `EffectiveUdpNetworkPlan`, `NetworkResolutionPreview`, `NetworkConsistencyStatus`, timestamps/generation and `preview(profile, appliedPlan)`.
+- Produces immutable `EffectiveUdpNetworkPlan`, `NetworkResolutionPreview`, `NetworkConsistencyStatus`, independent revision/generation identity and `preview(profile, appliedPlan)`.
 - Preview capacity is one active plus one conflated queued request per device, starts no more often than every 250 ms, and stores one latest result.
 
-- [ ] Write failing tests for destination/source timestamp provenance, disabled INACTIVE plan, unique/manual/ambiguous preview, applied equality, `RESOLUTION_CHANGED`, `REAPPLY_REQUIRED`, cancellation, latest-response-wins, one queued refresh and zero runtime mutations through fake observers.
+- [ ] Write failing tests for destination/source timestamp provenance, disabled INACTIVE plan, unique/manual/ambiguous preview, applied equality, `RESOLUTION_CHANGED`, `REAPPLY_REQUIRED`, same revision with changed resolution requiring explicit Re-Apply, cancellation, latest-response-wins, one queued refresh and zero runtime mutations through fake observers.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.network.NetworkResolutionPreviewServiceTest"`; expect compile failure.
 - [ ] Implement defensive immutable copies, comparison and bounded preview orchestration; do not reference receiver/source.
 - [ ] Run focused tests, then `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.network.HostResolverTest" --tests "com.filamentvision.backend.input.network.EffectiveUdpNetworkPlannerTest"`.
@@ -189,10 +190,10 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 - Modify: repository fakes in `backend/src/test/kotlin/com/filamentvision/backend/input/runtime/`
 
 **Interfaces:**
-- Replace `markApplied(expectedAppliedRevision, revision)` with `markApplied(expectedAppliedRevision, revision, plan): Boolean`.
+- Replace `markApplied(expectedAppliedRevision, revision)` with `markApplied(expectedAppliedRevision, expectedResolutionGeneration, revision, plan): Boolean`; the plan contains exactly `expectedResolutionGeneration + 1` for every non-no-op Apply.
 - State returns saved profile, applied profile, applied plan/legacy status from one snapshot.
 
-- [ ] Write failing tests for revision+plan same-transaction update, stale applied CAS, concurrent Save N+1 versus Apply N, persistence exception, reopen equality, and proof that neither column advances alone.
+- [ ] Write failing tests for revision+plan same-transaction update, same-revision generation-only advance, stale applied revision CAS, stale generation CAS, concurrent same-revision Re-Apply lost-update prevention, concurrent Save N+1 versus Apply N, persistence exception, reopen equality, and proof that revision/generation/plan cannot advance separately.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.persistence.sqlite.SqliteRepositoryContractTest"`; expect compile/signature failures.
 - [ ] Implement repository interface and SQLite transaction, then update test fakes mechanically without adding runtime behavior.
 - [ ] Run focused tests, then `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.runtime.RaspberryPiUdpInputConfigurationServiceTest"`.
@@ -244,9 +245,9 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 
 **Interfaces:**
 - Apply builds a plan through resolver/planner, prepares a candidate, CAS-persists revision+plan, publishes the immutable plan, then starts the committed loop.
-- Repeated applied revision is a no-op and retains generation/timestamps.
+- Same revision with `forceReapply=false` is a no-op; `forceReapply=true` rebuilds and commits a plan while keeping revision unchanged and incrementing generation.
 
-- [ ] Write failing happy-path tests for enabled Apply, disabled Apply without resolution, hostname/source set, bind change, parser-only change, idempotent repeated Apply, candidate invisibility through commit, and exactly one producer/receiver.
+- [ ] Write failing happy-path tests for enabled Apply, disabled Apply without resolution, hostname/source set, bind change, parser-only change, no-op repeated Apply, same-revision forced Re-Apply after DNS change, unchanged revision, incremented generation, new source/destination activation, candidate invisibility through commit, and exactly one producer/receiver.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.runtime.RaspberryPiUdpInputConfigurationServiceTest" --tests "com.filamentvision.backend.input.runtime.RaspberryPiUdpInputRouterTest"`; expect failures because Apply has no plan.
 - [ ] Implement the serialized staged commit with an injected planner/clock/generation source. Runtime publication after CAS must be a non-throwing atomic state update.
 - [ ] Run focused tests, then `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.runtime.RaspberryPiUdpInputSourceTest" --tests "com.filamentvision.backend.input.runtime.ProductionUdpCompositionTest"`.
@@ -264,7 +265,7 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 - Produces `NetworkConfigurationConsistency` and fail-closed `NETWORK_CONFIGURATION_INCONSISTENT`.
 - Save stays available when inconsistent; Apply fails before preparation until restart/recovery.
 
-- [ ] Write failing tests for destination/source resolution failure, interface validation failure, candidate bind failure, Save N+1 race, markApplied false, repository exception, successful old-socket restoration, no provisional events, compensation failure, Save allowed and Apply rejected in fail-closed state.
+- [ ] Write failing tests for destination/source resolution failure including same-revision Re-Apply failure preserving old plan/receiver/generation, interface validation failure, candidate bind failure, Save N+1 race, stale-generation `markApplied` false, concurrent same-revision Re-Apply conflict, repository exception, successful old-socket restoration, no provisional events, compensation failure, Save allowed and Apply rejected in fail-closed state.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.runtime.FlexibleNetworkApplyRollbackTest"`; expect missing status and incorrect rollback behavior.
 - [ ] Implement exact compensation ordering and safe codes. Never claim old receiver is active after restoration failure.
 - [ ] Run focused tests, then `./gradlew.bat :backend:test --tests "com.filamentvision.backend.input.runtime.RaspberryPiUdpInputRouterTest" --tests "com.filamentvision.backend.input.runtime.RaspberryPiUdpInputConfigurationServiceTest"`.
@@ -300,8 +301,9 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 **Interfaces:**
 - Produces nested `network.bind/destination/sourceFilter/listenPort`, applied plan/consistency/reapply fields and `POST .../udp-network-resolution-preview`.
 - `/network-interfaces` becomes inventory only.
+- Apply DTO carries `expectedSavedRevision`, `expectedAppliedRevision`, `expectedResolutionGeneration`, and `forceReapply`; same-revision forced requests are valid.
 
-- [ ] Write failing API tests for all modes, authoritative malformed hostname/IPv6 errors, preview success/failure/multiple candidates, preview no revision/runtime/diagnostic change, Apply error-code mapping, applied plan response and old flat JSON rejection.
+- [ ] Write failing API tests for all modes, authoritative malformed hostname/IPv6 errors, preview success/failure/multiple candidates, preview no revision/runtime/diagnostic change, same-revision `forceReapply=true`, stale-generation conflict, Apply error-code mapping, applied plan response and old flat JSON rejection.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.api.FlexibleUdpNetworkApiTest"`; expect compile/404 failures.
 - [ ] Implement DTO mapping/routes and safe HTTP statuses: syntax 400, revision 409, resolution/interface/bind 409, storage/inconsistent 503. Do not expose platform exception text.
 - [ ] Run focused tests, then `./gradlew.bat :backend:test --tests "com.filamentvision.backend.api.UdpInputConfigurationApiTest" --tests "com.filamentvision.backend.api.RestContractTest" --tests "com.filamentvision.backend.api.RequestMediaContractTest" --tests "com.filamentvision.backend.api.HealthApiTest"`.
@@ -339,8 +341,9 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 
 **Interfaces:**
 - Produces TypeScript discriminated unions matching Backend DTOs and `previewUdpNetwork(device, network, signal)`.
+- Apply client sends revision, expected saved/applied revision, expected generation and `forceReapply` explicitly.
 
-- [ ] Write failing tests for defaults, all discriminated modes, hostname/IPv4 feedback, empty source -> ANY, nested Save body, preview route/body, Backend field errors and request abort.
+- [ ] Write failing tests for defaults, all discriminated modes, hostname/IPv4 feedback, empty source -> ANY, nested Save body, preview route/body, normal Apply body, same-revision forced Re-Apply body, Backend field errors and request abort.
 - [ ] Run `npm.cmd test -- --run src/config/raspberryPiUdpInputProfile.test.ts src/services/BackendApiClient.test.ts`; expect TypeScript/test failures for absent network types.
 - [ ] Implement domain/client/instant validation; Backend remains authoritative.
 - [ ] Run focused tests, then `npm.cmd run lint`.
@@ -357,7 +360,7 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 - Normal view shows Enabled, Backend Host/IP, Raspberry Pi Host/IP, port, status, resolved values, last sender, send target and Resolve/Save/Apply.
 - Advanced section exposes bind/interface/manual IP and explicit destination/source modes.
 
-- [ ] Write failing interaction tests for AUTO/simple defaults, manual hostnames, empty source ANY, Advanced mode controls, multiple candidates, Resolve preview only, Save without Apply, Apply after Save, resolution changed/reapply labels, offline Save, server validation and navigation cancellation/latest response.
+- [ ] Write failing interaction tests for AUTO/simple defaults, manual hostnames, empty source ANY, Advanced mode controls, multiple candidates, Resolve preview only, Save without Apply, Apply after Save, same-revision `REAPPLY_REQUIRED` enabling Apply with `forceReapply=true`, successful generation update clearing the warning, offline Save, server validation and navigation cancellation/latest response.
 - [ ] Run `npm.cmd test -- --run src/components/RaspberryPiUdpInputSettings.test.tsx`; expect missing controls/labels.
 - [ ] Implement the simple-first layout and `<details>` Advanced section. Never display preview as applied or Connected.
 - [ ] Run focused tests, then `npm.cmd test -- --run src/config/raspberryPiUdpInputProfile.test.ts src/services/BackendApiClient.test.ts` and `npm.cmd run lint`.
@@ -392,7 +395,7 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 **Interfaces:**
 - Uses real IPv4 UDP sockets with dynamically allocated ports and injected resolution/interface inventory; production path remains independent of the fixture.
 
-- [ ] Write tests for ANY input, multi-address applied set, mismatch, hostname Apply, hostname change preview then reapply, wildcard->specific/manual restart, bind failure restoration, different-subnet planner acceptance, JPEG structured multi-chunk measurement and Inspector raw/parsed results.
+- [ ] Write tests for ANY input, multi-address applied set, mismatch, hostname Apply, injected hostname change preview then same-revision forced Re-Apply, unchanged saved/applied revision, incremented generation, removal of the old source address, wildcard->specific/manual restart, bind failure restoration, different-subnet planner acceptance, JPEG structured multi-chunk measurement and Inspector raw/parsed results.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.e2e.FlexibleUdpNetworkE2ETest"`; expect failures because the production chain is not fully wired.
 - [ ] Make only integration wiring fixes revealed by the tests; do not change transport bytes or Vision expected values.
 - [ ] Run focused tests, then `./gradlew.bat :backend:test --tests "com.filamentvision.backend.e2e.UdpInputEndToEndTest" --tests "com.filamentvision.backend.e2e.ReviewRegressionTest"`.
@@ -410,7 +413,7 @@ For each task record: task number, commit SHA, changed files, RED reason, focuse
 **Interfaces:**
 - Produces final evidence only; no new protocol or product behavior.
 
-- [ ] Add boundedness assertions for 100 preview refreshes, 50 resolution/bind/CAS failures, compensation failure isolation, one latest preview, per-device preview active<=1/queued<=1, process resolver active<=2/queued<=2, source set<=16, provisional<=1, committed receiver<=1, Inspector retained bytes unchanged, mailbox<=1 and `activeProducerCount<=1`.
+- [ ] Add boundedness assertions for 100 preview refreshes, repeated same-revision Re-Apply, 50 resolution/bind/CAS failures, stale-generation conflicts, compensation failure isolation, one latest preview, per-device preview active<=1/queued<=1, process resolver active<=2/queued<=2, source set<=16, provisional<=1, committed receiver<=1, Inspector retained bytes unchanged, mailbox<=1 and `activeProducerCount<=1`.
 - [ ] Run `./gradlew.bat :backend:test --tests "com.filamentvision.backend.e2e.LongRunBoundednessTest"`; verify RED first for newly exposed counters, then add only test-observability accessors that allocate no production state.
 - [ ] Run the focused test and record maxima in the verification document.
 - [ ] Run `./gradlew.bat clean :core:test :backend:test verifyStandaloneIndependence --no-daemon` with JDK 21.
