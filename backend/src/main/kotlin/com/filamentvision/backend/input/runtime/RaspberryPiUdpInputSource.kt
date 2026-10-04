@@ -4,6 +4,7 @@ import com.filamentvision.backend.input.diagnostics.UdpDiagnostics
 import com.filamentvision.backend.input.inspector.PacketInspector
 import com.filamentvision.backend.input.inspector.RawParseStatus
 import com.filamentvision.backend.input.network.BackendIpv4Resolver
+import com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan
 import com.filamentvision.backend.input.profile.*
 import com.filamentvision.backend.input.reassembly.StructuredReassemblyObserver
 import com.filamentvision.backend.input.transport.*
@@ -30,6 +31,7 @@ class RaspberryPiUdpInputSource(
     private val compiledFactory: (RaspberryPiUdpInputProfile, StructuredReassemblyObserver) -> CompiledRaspberryPiInputProfile =
         CompiledRaspberryPiInputProfile::compile,
     val packetInspector: PacketInspector = PacketInspector(),
+    appliedNetworkPlan: EffectiveUdpNetworkPlan? = null,
 ) : CameraInputSource {
     init { require(RaspberryPiUdpInputProfileValidator().validate(profile).isValid) { "Invalid Raspberry Pi UDP input profile" } }
 
@@ -40,6 +42,7 @@ class RaspberryPiUdpInputSource(
     // Caller-owned frames may outlive a processor or receiver lifecycle.
     private val decodedPermit = DecodedFramePermit()
     @Volatile private var profile = profile
+    @Volatile private var appliedNetworkPlan = appliedNetworkPlan
     @Volatile private var activity = UdpActivity()
     @Volatile private var consistencyFailure: RaspberryPiUdpConsistencyException? = null
     private val udp = UdpDiagnostics(TransportMode.STRUCTURED_CHUNKED)
@@ -274,7 +277,7 @@ class RaspberryPiUdpInputSource(
         }
     }
 
-    private fun resolveBind(candidate: RaspberryPiUdpInputProfile): String = when (val selected = candidate.networkInterface) {
+    private fun resolveBind(candidate: RaspberryPiUdpInputProfile): String = appliedNetworkPlan?.actualBindIpv4 ?: when (val selected = candidate.networkInterface) {
         NetworkInterfaceSelection.Auto -> "0.0.0.0"
         is NetworkInterfaceSelection.Specific -> ipv4Resolver.resolve(selected, candidate.raspberryPiIpv4).selectedInterface?.ipv4
             ?: error("SELECTED_IPV4_INTERFACE_UNAVAILABLE")
@@ -307,7 +310,8 @@ class RaspberryPiUdpInputSource(
             }
         }, channelFactory = channelFactory, monotonicClock = monotonicClock, epochClock = epochClock,
             dispatcher = dispatcher, envelopeBytes = 4, bindIpv4 = bindIpv4,
-            maximumReceiveCapacity = UdpReceiveCapacityCalculator.calculate(38L + 60_000)) { datagram ->
+            maximumReceiveCapacity = UdpReceiveCapacityCalculator.calculate(38L + 60_000),
+            sourceIpv4s = compileAppliedSourceFilter()) { datagram ->
             activity.accepted(datagram.receivedAtMonotonicNanos)
             processingLock.withLock {
                 // A datagram may have passed the receiver guard immediately before a limit swap.
@@ -323,6 +327,13 @@ class RaspberryPiUdpInputSource(
                 }
             }
         }
+    }
+
+    private fun compileAppliedSourceFilter(): Set<java.net.Inet4Address>? {
+        val configured = appliedNetworkPlan?.resolvedSourceIpv4s ?: return profile.raspberryPiIpv4?.let {
+            setOf(UdpReceiver.requireIpv4LiteralForConfiguration(it))
+        }
+        return configured.mapTo(linkedSetOf()) { UdpReceiver.requireIpv4LiteralForConfiguration(it) }
     }
 
     private fun inspectRejected(datagram: ReceivedDatagram, status: RawParseStatus) {

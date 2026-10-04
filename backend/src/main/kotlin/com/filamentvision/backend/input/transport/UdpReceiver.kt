@@ -65,10 +65,11 @@ class UdpReceiver(
     envelopeBytes: Int = 0,
     private val bindIpv4: String = "0.0.0.0",
     maximumReceiveCapacity: UdpReceiveCapacity? = null,
+    sourceIpv4s: Set<Inet4Address>? = profile.sourceIp?.let { setOf(requireIpv4LiteralForConfiguration(it)) },
     private val consumer: UdpDatagramConsumer,
 ) {
     private val lifecycle = Mutex()
-    private val sourceFilter = Ipv4SourceFilter(profile.sourceIp)
+    private val sourceFilter = Ipv4SourceFilter(sourceIpv4s)
     @Volatile var receiveCapacity: UdpReceiveCapacity = UdpReceiveCapacityCalculator.forProfile(profile, envelopeBytes)
         private set
     private val physicalCapacity = maximumReceiveCapacity ?: receiveCapacity
@@ -183,7 +184,21 @@ class UdpReceiver(
         }
     }
 
-    private companion object {
+    companion object {
         const val MIN_SOCKET_RECEIVE_QUEUE_BYTES = 256 * 1024
+
+        internal fun requireIpv4LiteralForConfiguration(value: String): Inet4Address {
+            val parts = value.split('.')
+            require(parts.size == 4) { "sourceIp must be an IPv4 literal" }
+            val bytes = ByteArray(4)
+            parts.forEachIndexed { index, part ->
+                require(part.isNotEmpty() && part.all { it in '0'..'9' } && (part.length == 1 || part.first() != '0')) {
+                    "sourceIp must be a canonical IPv4 literal"
+                }
+                val octet = requireNotNull(part.toIntOrNull()).also { require(it in 0..255) }
+                bytes[index] = octet.toByte()
+            }
+            return InetAddress.getByAddress(bytes) as Inet4Address
+        }
     }
 }

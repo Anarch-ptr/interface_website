@@ -175,6 +175,27 @@ class UdpReceiverTest {
     }
 
     @Test
+    fun acceptsAnyMemberOfCompiledSourceSetAndDefensivelyCopiesConfiguration() = runBlocking {
+        val mutableSources = linkedSetOf(
+            InetAddress.getByName("127.0.0.1") as Inet4Address,
+            InetAddress.getByName("127.0.0.2") as Inet4Address,
+        )
+        val accepted = CompletableDeferred<Unit>()
+        val receiver = UdpReceiver(
+            profile = profile(port = freePort(), sourceIp = null),
+            sourceIpv4s = mutableSources,
+        ) { accepted.complete(Unit) }
+        mutableSources.clear()
+        try {
+            receiver.start()
+            send(receiver.localAddress.port, byteArrayOf(1))
+            withTimeout(3_000) { accepted.await() }
+        } finally {
+            receiver.stop()
+        }
+    }
+
+    @Test
     fun sentinelDatagramIsRejectedWithExplicitReason() = runBlocking {
         val dropped = CompletableDeferred<UdpReceiverDropReason>()
         var consumed = 0

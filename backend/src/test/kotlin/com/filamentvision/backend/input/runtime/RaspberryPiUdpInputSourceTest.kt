@@ -107,6 +107,25 @@ class RaspberryPiUdpInputSourceTest {
         } finally { f.source.stop() }
     }
 
+    @Test fun hostnameSourceUsesOnlyTheAlreadyAppliedCompiledIpv4Set() = runBlocking {
+        val configured = profile().withNetwork(
+            profile().network.copy(sourceFilter = SourceFilterProfile.IpOrHost("pi.local")),
+        )
+        val plan = EffectiveUdpNetworkPlan(
+            "0.0.0.0", null, null, "192.0.2.20", "pi.local",
+            setOf("192.0.2.10", "192.0.2.12"), ResolutionStatus.RESOLVED, ResolutionStatus.RESOLVED,
+            null, 1, 2, 3, 1,
+        )
+        val f = Fixture(configured, plan)
+        f.source.start()
+        try {
+            f.packet(wire(1), "192.0.2.12")
+            (withTimeout(3000) { f.source.inputs.first() } as CameraInput.Image).frame.close()
+            f.packet(wire(2), "192.0.2.11")
+            assertEquals(1L, f.source.udpDiagnostics().sourceFilteredDatagrams)
+        } finally { f.source.stop() }
+    }
+
     @Test fun repeatedConcurrentStartsOwnOneReceiverAndStopJoinsBeforeRestart() = runBlocking {
         val f = Fixture()
         coroutineScope { repeat(30) { launch(Dispatchers.Default) { f.source.start() } } }
@@ -319,14 +338,17 @@ class RaspberryPiUdpInputSourceTest {
         } finally { f.source.stop() }
     }
 
-    private class Fixture(p: RaspberryPiUdpInputProfile = profile()) {
+    private class Fixture(
+        p: RaspberryPiUdpInputProfile = profile(),
+        plan: EffectiveUdpNetworkPlan? = null,
+    ) {
         val now = AtomicLong(0)
         val decodes = AtomicLong()
         var opens = 0
         lateinit var socket: FakeChannel
         val source = RaspberryPiUdpInputSource(p, monotonicClock = MonotonicClock(now::get),
             epochClock = EpochClock { 1234 }, channelFactory = UdpChannelFactory { opens++; FakeChannel().also { socket = it } },
-            compiledFactory = { profile, observer ->
+            appliedNetworkPlan = plan, compiledFactory = { profile, observer ->
                 val c = CompiledRaspberryPiInputProfile.compile(profile, observer)
                 CompiledRaspberryPiInputProfile(c.profile, c.envelopeParser, c.transportParser, c.reassembler,
                     PayloadDecoder { decodes.incrementAndGet(); c.decoder.decode(it) })
