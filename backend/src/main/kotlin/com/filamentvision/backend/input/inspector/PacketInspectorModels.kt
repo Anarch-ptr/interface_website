@@ -1,5 +1,7 @@
 package com.filamentvision.backend.input.inspector
 
+import com.filamentvision.backend.input.network.AppliedUdpNetworkProvenance
+
 enum class RawParseStatus {
     VALID, SOURCE_IP_MISMATCH, DATAGRAM_TOO_LARGE_OR_TRUNCATED, DATAGRAM_TOO_SHORT,
     HEADER_MISMATCH, FOOTER_MISMATCH, INVALID_TRANSPORT_HEADER,
@@ -13,7 +15,8 @@ data class RawDatagramInspection(val sourceIpv4: String, val sourcePort: Int, va
     val datagramSize: Int, val receivedAtMonotonicNanos: Long, val status: RawParseStatus,
     val expectedHeaderHex: String, val expectedFooterHex: String, val actualHeader: Int?, val actualFooter: Int?,
     val headerMatched: Boolean?, val footerMatched: Boolean?,
-    val preview: ByteArray, val transport: TransportInspection? = null)
+    val preview: ByteArray, val transport: TransportInspection? = null,
+    val appliedNetwork: AppliedUdpNetworkProvenance? = null)
 data class ParsedFrameInspection(val payloadFormat: String, val decodeResult: String,
     val width: Int?, val height: Int?, val completedFrameBytes: Int,
     val receivedAtMonotonicNanos: Long, val preview: ByteArray)

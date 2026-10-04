@@ -1,6 +1,7 @@
 package com.filamentvision.backend.input.inspector
 
 import com.filamentvision.backend.input.profile.*
+import com.filamentvision.backend.input.network.EffectiveUdpNetworkPlan
 import com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata
 import com.filamentvision.backend.input.transport.StructuredTransportHeader
 import java.util.UUID
@@ -25,6 +26,7 @@ class PacketInspector(
     private var expiryGeneration = 0L
     private var closed = false
     @Volatile private var enabled = false
+    @Volatile private var appliedPlan: EffectiveUdpNetworkPlan? = null
     @Volatile var previewCopies: Long = 0
         private set
 
@@ -56,6 +58,10 @@ class PacketInspector(
 
     fun captureEnabled(): Boolean = observe(false) { true }
 
+    fun updateAppliedNetworkPlan(plan: EffectiveUdpNetworkPlan?) {
+        appliedPlan = plan?.immutableCopy()
+    }
+
     /** Return a token so a skipped/newer capture cannot acquire this Datagram's later metadata. */
     fun captureRaw(bytes: ByteArray, length: Int, metadata: ReceivedDatagramMetadata,
         profile: RaspberryPiUdpInputProfile, status: RawParseStatus): Long = observe(0L) {
@@ -70,7 +76,7 @@ class PacketInspector(
             boundary(bytes, length, 0), boundary(bytes, length, length - 2),
             if (checkEnvelope) matches(bytes, length, 0, header) else null,
             if (checkEnvelope) matches(bytes, length, length - 2, footer) else null,
-            bytes.copyOfRange(0, minOf(length, limit)))
+            bytes.copyOfRange(0, minOf(length, limit)), appliedNetwork = appliedPlan?.provenance())
         previewCopies++
         rawCaptureId = ++sequence
         snapshot = PacketInspectorSnapshot(sequence, raw, null)

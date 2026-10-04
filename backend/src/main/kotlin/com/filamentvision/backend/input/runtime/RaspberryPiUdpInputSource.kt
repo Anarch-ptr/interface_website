@@ -34,7 +34,10 @@ class RaspberryPiUdpInputSource(
     val packetInspector: PacketInspector = PacketInspector(),
     appliedNetworkPlan: EffectiveUdpNetworkPlan? = null,
 ) : CameraInputSource {
-    init { require(RaspberryPiUdpInputProfileValidator().validate(profile).isValid) { "Invalid Raspberry Pi UDP input profile" } }
+    init {
+        require(RaspberryPiUdpInputProfileValidator().validate(profile).isValid) { "Invalid Raspberry Pi UDP input profile" }
+        packetInspector.updateAppliedNetworkPlan(appliedNetworkPlan)
+    }
 
     private val lifecycle = Mutex()
     private val processingLock = Mutex()
@@ -95,7 +98,7 @@ class RaspberryPiUdpInputSource(
     val receiverCapacity: UdpReceiveCapacity? get() = receiver?.receiveCapacity
     val pendingInputCount: Int get() = synchronized(mailboxLock) { if (pending == null) 0 else 1 }
     val preAdmissionDroppedInputs: Long get() = udp.snapshot().preAdmissionDroppedInputs
-    fun udpDiagnostics() = udp.snapshot()
+    fun udpDiagnostics() = udp.snapshot().copy(appliedNetwork = appliedNetworkPlan?.provenance())
     fun operationalStatus() = activity.snapshot(monotonicClock.nowNanos())
 
     override suspend fun start() = lifecycle.withLock {
@@ -367,6 +370,7 @@ class RaspberryPiUdpInputSource(
                 if (restart || (active && profile.enabled && !next.enabled)) currentReceiver?.stop()
                 profile = next
                 appliedNetworkPlan = plan.immutableCopy()
+                packetInspector.updateAppliedNetworkPlan(appliedNetworkPlan)
                 processor = if (active && next.enabled) nextProcessor else null
                 if (active && next.enabled) {
                     if (prepared != null) {
@@ -466,6 +470,7 @@ class RaspberryPiUdpInputSource(
         val configured = targetPlan?.resolvedSourceIpv4s ?: return targetProfile.raspberryPiIpv4?.let {
             setOf(UdpReceiver.requireIpv4LiteralForConfiguration(it))
         }
+        if (configured.isEmpty()) return null
         return configured.mapTo(linkedSetOf()) { UdpReceiver.requireIpv4LiteralForConfiguration(it) }
     }
 

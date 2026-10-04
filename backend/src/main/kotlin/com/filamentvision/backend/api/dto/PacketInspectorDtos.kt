@@ -12,7 +12,8 @@ data class RawDatagramInspectionDto(val sourceIpv4: String, val sourcePort: Int,
     val datagramSize: Int, val receivedAtMonotonicNanos: Long, val status: String,
     val headerHex: String?, val footerHex: String?, val expectedHeaderHex: String, val expectedFooterHex: String,
     val headerMatched: Boolean?, val footerMatched: Boolean?,
-    val hexPreview: String, val transport: TransportInspectionDto?)
+    val hexPreview: String, val transport: TransportInspectionDto?,
+    val appliedNetwork: AppliedUdpNetworkProvenanceDto?)
 data class ParsedFrameInspectionDto(val payloadFormat: String, val decodeResult: String,
     val width: Int?, val height: Int?, val completedFrameBytes: Int, val receivedAtMonotonicNanos: Long,
     val hexPreview: String)
@@ -30,7 +31,7 @@ fun PacketInspectorSnapshot.toDto() = PacketInspectorSnapshotDto(sequence,
             TransportInspectionDto(it.protocolVersion, it.compatibilityStreamId, it.frameId, it.chunkIndex,
                 it.chunkCount, it.sourceTimestampMicros, it.payloadLength, it.framePayloadBytes, it.status,
                 raw.preview.hex(start, minOf(raw.preview.size, start + it.payloadLength)))
-        }),
+        }, raw.appliedNetwork?.toDto()),
     parsedFrame?.let { ParsedFrameInspectionDto(it.payloadFormat, it.decodeResult, it.width, it.height,
         it.completedFrameBytes, it.receivedAtMonotonicNanos, it.preview.hex()) })
 
@@ -50,3 +51,8 @@ private fun Int?.boundaryHex(): String? = this?.let { value -> buildString(5) {
     append(' ')
     append(digits[(value ushr 4) and 15]); append(digits[value and 15])
 } }
+
+internal fun com.filamentvision.backend.input.network.AppliedUdpNetworkProvenance.toDto() =
+    AppliedUdpNetworkProvenanceDto(actualBindIpv4, actualBindInterfaceId, configuredDestination,
+        resolvedDestinationIpv4, configuredSource, resolvedSourceIpv4s, resolutionGeneration,
+        planCreatedAtEpochMillis, appliedAtEpochMillis)

@@ -41,7 +41,7 @@ class UdpDiagnosticsApiTest {
             fields.forEachIndexed { index, field -> assertEquals(field, index + 1L, data[field].asLong()) }
             assertEquals("192.168.1.7", data["lastPacketSourceIpv4"].asText())
             assertEquals(5050, data["lastPacketSourcePort"].asInt())
-            assertEquals((fields + listOf("status", "statusDetail", "lastPacketSourceIpv4", "lastPacketSourcePort")).toSet(), data.fieldNames().asSequence().toSet())
+            assertEquals((fields + listOf("status", "statusDetail", "lastPacketSourceIpv4", "lastPacketSourcePort", "appliedNetwork")).toSet(), data.fieldNames().asSequence().toSet())
         }
     }
 
@@ -53,6 +53,8 @@ class UdpDiagnosticsApiTest {
         suspend fun data() = parse(client.get("/api/v1/devices/${c.deviceId}/udp-diagnostics").bodyAsText())["data"]
         try {
             val enabled = RaspberryPiUdpInputProfile.defaults().copy(enabled = true, listenPort = port)
+                .withNetwork(RaspberryPiUdpInputProfile.defaults().network.copy(
+                    destination = AdvertisedDestinationProfile.Manual("127.0.0.1"), listenPort = port))
             c.application.saveUdpInput(c.deviceId, "enable", 1, enabled)
             c.application.applyUdpInput(c.deviceId, "apply", 2, 2)
             c.application.start(c.deviceId, "start", null, null)

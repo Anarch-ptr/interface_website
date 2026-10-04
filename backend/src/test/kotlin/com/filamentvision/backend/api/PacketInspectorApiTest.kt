@@ -67,6 +67,9 @@ class PacketInspectorApiTest {
         val port = DatagramSocket(0).use { it.localPort }
         val profile = RaspberryPiUdpInputProfile.defaults().copy(enabled = true, listenPort = port,
             raspberryPiIpv4 = "127.0.0.2", payload = ImagePayloadProfile.Gray8(2, 1))
+            .withNetwork(RaspberryPiUdpInputProfile.defaults().network.copy(
+                destination = AdvertisedDestinationProfile.Manual("127.0.0.1"),
+                sourceFilter = SourceFilterProfile.IpOrHost("127.0.0.2"), listenPort = port))
         try {
             c.application.saveUdpInput(c.deviceId, "enable", 1, profile)
             c.application.applyUdpInput(c.deviceId, "apply", 2, 2)

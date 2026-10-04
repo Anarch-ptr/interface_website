@@ -12,6 +12,18 @@ enum class NetworkConsistencyStatus {
     NETWORK_CONFIGURATION_INCONSISTENT,
 }
 
+data class AppliedUdpNetworkProvenance(
+    val actualBindIpv4: String,
+    val actualBindInterfaceId: String?,
+    val configuredDestination: String?,
+    val resolvedDestinationIpv4: String?,
+    val configuredSource: String?,
+    val resolvedSourceIpv4s: Set<String>,
+    val resolutionGeneration: Long,
+    val planCreatedAtEpochMillis: Long,
+    val appliedAtEpochMillis: Long?,
+)
+
 data class EffectiveUdpNetworkPlan(
     val actualBindIpv4: String,
     val actualBindInterfaceId: String?,
@@ -27,6 +39,10 @@ data class EffectiveUdpNetworkPlan(
     val appliedAtEpochMillis: Long?,
     val resolutionGeneration: Long,
 ) {
+    fun provenance() = AppliedUdpNetworkProvenance(actualBindIpv4, actualBindInterfaceId,
+        configuredDestination, resolvedDestinationIpv4, configuredSource,
+        immutableIpv4Set(resolvedSourceIpv4s), resolutionGeneration,
+        planCreatedAtEpochMillis, appliedAtEpochMillis)
     internal fun immutableCopy() = copy(resolvedSourceIpv4s = immutableIpv4Set(resolvedSourceIpv4s))
 
     fun applied(appliedAt: Long, generation: Long) = copy(

@@ -1,6 +1,7 @@
 package com.filamentvision.backend.input.diagnostics
 
 import com.filamentvision.backend.input.profile.TransportMode
+import com.filamentvision.backend.input.network.AppliedUdpNetworkProvenance
 import com.filamentvision.backend.input.runtime.RaspberryPiProcessingStage
 import com.filamentvision.backend.input.runtime.ReceivedDatagramMetadata
 import java.util.concurrent.atomic.AtomicLong
@@ -20,6 +21,7 @@ data class UdpDiagnosticsSnapshot(
     val lastPacketSourceIpv4: String? = null, val lastPacketSourcePort: Int? = null,
     val lastPacketEpochMillis: Long? = null, val preAdmissionDroppedInputs: Long = 0,
     val processingBackpressureDrops: Long = 0,
+    val appliedNetwork: AppliedUdpNetworkProvenance? = null,
 )
 
 /** Fixed-size per-camera counters. A snapshot allocates one immutable value and no history. */

@@ -32,6 +32,10 @@ data class EffectiveUdpNetworkPlanDto(val actualBindIpv4: String, val actualBind
     val configuredDestination: String?, val resolvedDestinationIpv4: String?, val configuredSource: String?,
     val resolvedSourceIpv4s: Set<String>, val destinationStatus: String, val sourceStatus: String,
     val planCreatedAtEpochMillis: Long, val appliedAtEpochMillis: Long?, val resolutionGeneration: Long)
+data class AppliedUdpNetworkProvenanceDto(val actualBindIpv4: String, val actualBindInterfaceId: String?,
+    val configuredDestination: String?, val resolvedDestinationIpv4: String?, val configuredSource: String?,
+    val resolvedSourceIpv4s: Set<String>, val resolutionGeneration: Long,
+    val planCreatedAtEpochMillis: Long, val appliedAtEpochMillis: Long?)
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 data class UdpInputConfigurationStateDto(val savedRevision: Long, val appliedRevision: Long,

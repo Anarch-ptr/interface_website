@@ -103,4 +103,5 @@ fun UdpDiagnosticsView.toDto() = counters.let { d -> UdpDiagnosticsDto(operation
     d.outOfOrderChunks, d.missingChunks, d.lateChunks, d.reassemblyTimeouts, d.invalidTransportHeaders, d.oversizedFrames,
     d.invalidHeaderCount, d.invalidFooterCount, d.invalidPayloadSizeCount, d.decodeFailures, d.sourceFilteredDatagrams,
     d.oversizedOrTruncatedDatagrams, d.lastPacketMonotonicNanos, d.lastValidFrameMonotonicNanos,
-    d.lastPacketSourceIpv4, d.lastPacketSourcePort, d.lastPacketEpochMillis, d.preAdmissionDroppedInputs, d.processingBackpressureDrops) }
+    d.lastPacketSourceIpv4, d.lastPacketSourcePort, d.lastPacketEpochMillis, d.preAdmissionDroppedInputs,
+    d.processingBackpressureDrops, d.appliedNetwork?.toDto()) }

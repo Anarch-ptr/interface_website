@@ -24,4 +24,5 @@ data class UdpDiagnosticsDto(val status: String, val statusDetail: String?,
     val sourceFilteredDatagrams: Long, val oversizedOrTruncatedDatagrams: Long,
     val lastPacketMonotonicNanos: Long?, val lastValidFrameMonotonicNanos: Long?,
     val lastPacketSourceIpv4: String?, val lastPacketSourcePort: Int?, val lastPacketEpochMillis: Long?,
-    val preAdmissionDroppedInputs: Long, val processingBackpressureDrops: Long)
+    val preAdmissionDroppedInputs: Long, val processingBackpressureDrops: Long,
+    val appliedNetwork: AppliedUdpNetworkProvenanceDto? = null)
