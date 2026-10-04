@@ -36,6 +36,7 @@ Assert-Contains $start 'FilamentVision.WebsiteLauncher' 'Launcher must serialize
 Assert-Contains $start 'backend.log' 'Backend failures must have a component log.'
 Assert-Contains $start 'frontend.log' 'Frontend failures must have a component log.'
 Assert-Contains $start 'launcher.log' 'Readiness transitions must have a launcher log.'
+Assert-Contains $start 'call `"$ScriptPath`" `"$LogPath`"' 'CMD /c must use call so quoted script and log paths execute reliably.'
 
 Assert-Contains $startBat '-NoProfile' 'Start wrapper must not load the user PowerShell profile.'
 Assert-Contains $stopBat '-NoProfile' 'Stop wrapper must not load the user PowerShell profile.'

@@ -108,7 +108,7 @@ function Find-GradleJavaHome {
 function Start-LauncherWindow {
     param([string] $ScriptPath, [string] $WorkingDirectory, [string] $PidFile, [string] $LogPath)
     Set-Content -LiteralPath $LogPath -Value "[$([DateTime]::Now.ToString('s'))] workingDirectory=$WorkingDirectory" -Encoding UTF8
-    $arguments = @('/d', '/c', "`"$ScriptPath`" `"$LogPath`"")
+    $arguments = @('/d', '/c', "call `"$ScriptPath`" `"$LogPath`"")
     $process = Start-Process -FilePath $env:ComSpec -ArgumentList $arguments -WorkingDirectory $WorkingDirectory -PassThru
     Set-Content -LiteralPath $PidFile -Value $process.Id -NoNewline
     return $process
