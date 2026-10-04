@@ -18,6 +18,7 @@ class RaspberryPiUdpInputConfigurationService(
     private val planner: EffectiveUdpNetworkPlanner = EffectiveUdpNetworkPlanner(),
     private val clockMillis: () -> Long = System::currentTimeMillis,
 ) {
+    private val previewService = NetworkResolutionPreviewService(resolver, planner, clockMillis)
     suspend fun save(expectedSavedRevision: Long, profile: RaspberryPiUdpInputProfile): ProfileRevision = router.serializedSave {
         val validation = RaspberryPiUdpInputProfileValidator().validate(profile)
         require(validation.isValid) { validation.errors.joinToString { "${it.path}: ${it.message}" } }
@@ -108,4 +109,9 @@ class RaspberryPiUdpInputConfigurationService(
             }
         }
     }
+
+    suspend fun preview(deviceId: String, profile: RaspberryPiUdpInputProfile, state: RaspberryPiUdpProfileState) =
+        previewService.preview(deviceId,
+            PreviewProfile(profile.enabled, profile.network, state.saved.revision, state.applied.revision),
+            state.appliedPlan)
 }

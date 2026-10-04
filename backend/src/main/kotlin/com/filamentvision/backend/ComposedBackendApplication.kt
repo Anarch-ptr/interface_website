@@ -97,7 +97,9 @@ internal class ComposedBackendApplication(private val c: BackendComposition,
     private suspend fun udpView(outcome: RaspberryPiUdpApplyOutcome? = null): UdpInputConfigurationView {
         val state = c.io { c.udpProfileRepository.state() }
         return UdpInputConfigurationView(state.saved.revision, state.applied.revision,
-            state.saved.profile, state.applied.profile, outcome)
+            state.saved.profile, state.applied.profile, outcome, state.resolutionGeneration,
+            state.appliedPlan, c.udpInputRouter?.networkConsistency ?: state.networkConsistencyStatus,
+            state.networkConsistencyStatus == NetworkConsistencyStatus.REAPPLY_REQUIRED)
     }
     override suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView {
         device(deviceId); return c.commands.withLock { udpView() }
@@ -112,21 +114,37 @@ internal class ComposedBackendApplication(private val c: BackendComposition,
     }
     override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
         expectedSavedRevision: Long): UdpInputConfigurationView {
+        val state = c.io { c.udpProfileRepository.state() }
+        return applyUdpInput(deviceId, commandId, revision, expectedSavedRevision,
+            state.applied.revision, state.resolutionGeneration, false)
+    }
+    override suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long,
+        expectedSavedRevision: Long, expectedAppliedRevision: Long, expectedResolutionGeneration: Long,
+        forceReapply: Boolean): UdpInputConfigurationView {
         device(deviceId)
         return dedup("udpApply", commandId) {
             val savedRevision = c.io { c.udpProfileRepository.state().saved.revision }
             if (savedRevision != expectedSavedRevision) conflict()
             // Revisions are append-only; an identity beyond the newest saved revision cannot exist.
             if (revision > savedRevision) missing()
-            val result = udpOperation { c.io { (c.udpInputService ?: unavailableUdp(deviceId)).apply(revision) } }
+            val result = udpOperation { c.io { (c.udpInputService ?: unavailableUdp(deviceId)).apply(
+                revision, forceReapply, expectedAppliedRevision, expectedResolutionGeneration) } }
             when (result.outcome) {
                 RaspberryPiUdpApplyOutcome.CONFLICT -> conflict()
-                RaspberryPiUdpApplyOutcome.INVALID -> throw ApplicationFailure(ApplicationFailureCode.INVALID)
+                RaspberryPiUdpApplyOutcome.INVALID -> throw ApplicationFailure(ApplicationFailureCode.CONFLICT, result.errorCode)
                 RaspberryPiUdpApplyOutcome.APPLIED -> {
                     c.publishUdpInputState()
                     udpView(result.outcome)
                 }
             }
+        }
+    }
+    override suspend fun udpNetworkResolutionPreview(deviceId: String, network: UdpNetworkProfile): NetworkResolutionPreview {
+        device(deviceId)
+        return c.commands.withLock {
+            val state = c.io { c.udpProfileRepository.state() }
+            val profile = state.saved.profile.withNetwork(network)
+            c.io { (c.udpInputService ?: unavailableUdp(deviceId)).preview(deviceId, profile, state) }
         }
     }
     private suspend fun <T> udpOperation(action: suspend () -> T): T = try { action() }

@@ -59,6 +59,6 @@ class RequestMediaContractTest {
         Triple(HttpMethod.Delete, "/calibration/drafts/draft1", ""),
         Triple(HttpMethod.Put, "/udp-input-configuration", ",\"expectedSavedRevision\":1,\"configuration\":" +
             parse(udpSaveJson("body", 1))["configuration"].toString()),
-        Triple(HttpMethod.Post, "/udp-input-configuration/apply", ",\"revision\":1,\"expectedSavedRevision\":1"),
+        Triple(HttpMethod.Post, "/udp-input-configuration/apply", ",\"revision\":1,\"expectedSavedRevision\":1,\"expectedAppliedRevision\":1,\"expectedResolutionGeneration\":0,\"forceReapply\":false"),
     )
 }

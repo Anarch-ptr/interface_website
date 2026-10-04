@@ -67,9 +67,15 @@ fun Application.installRestApi(backend: BackendApplication, correlationId: () ->
                 } }
                 post("/udp-input-configuration/apply") { api(correlationId) { correlation ->
                     val request = body<ApplyUdpInputConfigurationRequest>(); command(request.commandId)
-                    valid(request.revision > 0 && request.expectedSavedRevision > 0)
+                    valid(request.revision > 0 && request.expectedSavedRevision > 0 &&
+                        request.expectedAppliedRevision > 0 && request.expectedResolutionGeneration >= 0)
                     reply(correlation, backend.applyUdpInput(id("deviceId"), request.commandId, request.revision,
-                        request.expectedSavedRevision).toDto())
+                        request.expectedSavedRevision, request.expectedAppliedRevision,
+                        request.expectedResolutionGeneration, request.forceReapply).toDto())
+                } }
+                post("/udp-network-resolution-preview") { api(correlationId) { correlation ->
+                    val request = body<UdpNetworkResolutionPreviewRequest>()
+                    reply(correlation, backend.udpNetworkResolutionPreview(id("deviceId"), request.network.toDomain()).toDto())
                 } }
                 post("/calibration/drafts") { api(correlationId) { correlation ->
                     val request = body<CreateDraftRequest>(); command(request.commandId); valid(request.cameraId.isNotBlank())
@@ -189,7 +195,8 @@ private suspend fun RoutingContext.api(generator: () -> String, block: suspend (
             is ApplicationFailure -> when (failure.code) {
                 ApplicationFailureCode.INVALID -> badRequest()
                 ApplicationFailureCode.NOT_FOUND -> ApiHttpFailure(HttpStatusCode.NotFound, "NOT_FOUND", "Resource not found")
-                ApplicationFailureCode.CONFLICT -> ApiHttpFailure(HttpStatusCode.Conflict, "CONFLICT", "Command conflicts with current state")
+                ApplicationFailureCode.CONFLICT -> ApiHttpFailure(HttpStatusCode.Conflict,
+                    failure.safeCode ?: "CONFLICT", "Command conflicts with current state")
                 ApplicationFailureCode.REQUIRES_STOP -> ApiHttpFailure(HttpStatusCode.Conflict, "REQUIRES_STOP", "Stop monitoring before applying this revision")
                 ApplicationFailureCode.UNAVAILABLE -> ApiHttpFailure(HttpStatusCode.ServiceUnavailable, "UNAVAILABLE", "Operation unavailable")
                 ApplicationFailureCode.UDP_BIND_FAILED -> ApiHttpFailure(HttpStatusCode.Conflict, "UDP_BIND_FAILED", "UDP endpoint could not be bound")

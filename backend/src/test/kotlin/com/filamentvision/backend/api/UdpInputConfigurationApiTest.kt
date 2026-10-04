@@ -88,9 +88,14 @@ class UdpInputConfigurationApiTest {
             c.application.start(c.deviceId, "start", null, null)
             DatagramSocket(null).use { occupied ->
                 occupied.reuseAddress = false; occupied.bind(InetSocketAddress("0.0.0.0", 0))
-                c.application.saveUdpInput(c.deviceId, "busy", 1,
-                    RaspberryPiUdpInputProfile.defaults().copy(enabled = true, listenPort = occupied.localPort))
-                val failed = client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(udpApplyJson("bind", 2, 2)) }
+                val busyProfile = RaspberryPiUdpInputProfile.defaults().copy(enabled = true, listenPort = occupied.localPort)
+                    .withNetwork(RaspberryPiUdpInputProfile.defaults().network.copy(
+                        destination = AdvertisedDestinationProfile.Manual("127.0.0.1"),
+                        listenPort = occupied.localPort,
+                    ))
+                c.application.saveUdpInput(c.deviceId, "busy", 1, busyProfile)
+                val generation = c.udpProfileRepository.state().resolutionGeneration
+                val failed = client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(udpApplyJson("bind", 2, 2, 1, generation)) }
                 assertError(failed, HttpStatusCode.Conflict, "UDP_BIND_FAILED")
                 assertEquals(1L, c.udpProfileRepository.state().applied.revision)
                 assertFalse((c.inputSource as RaspberryPiUdpInputSource).effectiveProfile.enabled)
@@ -98,9 +103,11 @@ class UdpInputConfigurationApiTest {
             }
             c.application.stop(c.deviceId, "stop")
             c.application.saveUdpInput(c.deviceId, "absent-interface", 2, RaspberryPiUdpInputProfile.defaults().copy(
+                enabled = true,
                 networkInterface = NetworkInterfaceSelection.Specific("not-a-real-interface", "192.0.2.8")))
-            assertError(client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(udpApplyJson("interface", 3, 3)) },
-                HttpStatusCode.Conflict, "UDP_BIND_FAILED")
+            val generation = c.udpProfileRepository.state().resolutionGeneration
+            assertError(client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(udpApplyJson("interface", 3, 3, 1, generation)) },
+                HttpStatusCode.Conflict, "INTERFACE_NOT_FOUND")
             assertEquals(1L, c.udpProfileRepository.state().applied.revision)
             assertTrue(c.udpProfileRepository.markApplied(1, 3)) // Inject an inconsistent persisted pointer at the repository boundary.
             assertError(client.post("$base/apply") { contentType(ContentType.Application.Json); setBody(udpApplyJson("inconsistent", 3, 3)) },
@@ -113,7 +120,7 @@ class UdpInputConfigurationApiTest {
         val response = client.get(base)
         assertEquals(HttpStatusCode.OK, response.status)
         val profile = parse(response.bodyAsText())["data"]["configuration"]
-        assertEquals(setOf("enabled", "networkInterface", "listenPort", "raspberryPiIpv4", "payload", "envelope", "transportLimits"), profile.fieldNames().asSequence().toSet())
+        assertEquals(setOf("enabled", "network", "payload", "envelope", "transportLimits"), profile.fieldNames().asSequence().toSet())
     }
 
     @Test fun realSaveApplyIsNormalizedDurableAndIdempotentWithCas() = testApplication {
@@ -180,7 +187,7 @@ class UdpInputConfigurationApiTest {
         try {
             for ((from, to, field) in listOf(Triple("\"listenPort\":5000", "\"listenPort\":0", "listenPort"),
                 Triple("aa01", "AA", "envelope.headerHex"), Triple("0d0a", "GG01", "envelope.footerHex"),
-                Triple("\"raspberryPiIpv4\":null", "\"raspberryPiIpv4\":\"::1\"", "raspberryPiIpv4"),
+                Triple("\"hostOrIpv4\":\"127.0.0.1\"", "\"hostOrIpv4\":\"::1\"", "network.destination.hostOrIpv4"),
                 Triple("\"maxChunkCount\":32768", "\"maxChunkCount\":65536", "transportLimits.maxChunkCount"))) {
                 val response = client.put(base) { contentType(ContentType.Application.Json); setBody(udpSaveJson("invalid", 1).replace(from, to)) }
                 assertEquals(response.bodyAsText(), HttpStatusCode.BadRequest, response.status)
@@ -200,8 +207,13 @@ internal suspend fun openApiComposition(monotonicMillis: () -> Long = { System.n
 }
 internal fun udpSaveJson(command: String, revision: Long, payload: String = """{"format":"GRAY8","width":32,"height":16}""") = """{
     "commandId":"$command","expectedSavedRevision":$revision,"configuration":{
-      "enabled":false,"networkInterface":{"mode":"AUTO"},"listenPort":5000,"raspberryPiIpv4":null,
+      "enabled":false,"network":{"bind":{"mode":"AUTO"},
+      "destination":{"mode":"MANUAL","hostOrIpv4":"127.0.0.1"},
+      "sourceFilter":{"mode":"ANY"},"listenPort":5000},
       "payload":$payload,"envelope":{"headerHex":"aa01","footerHex":"0d0a"},
       "transportLimits":{"maxInFlightFrames":2,"maxFrameBytes":33554432,"frameTimeoutMs":1000,"maxChunkCount":32768,"maxChunkPayloadBytes":1400}}}"""
-internal fun udpApplyJson(command: String, revision: Long, expected: Long) =
-    """{"commandId":"$command","revision":$revision,"expectedSavedRevision":$expected}"""
+internal fun udpApplyJson(command: String, revision: Long, expected: Long,
+    expectedApplied: Long = (revision - 1).coerceAtLeast(1),
+    expectedGeneration: Long = (revision - 2).coerceAtLeast(0),
+    forceReapply: Boolean = false) =
+    """{"commandId":"$command","revision":$revision,"expectedSavedRevision":$expected,"expectedAppliedRevision":$expectedApplied,"expectedResolutionGeneration":$expectedGeneration,"forceReapply":$forceReapply}"""

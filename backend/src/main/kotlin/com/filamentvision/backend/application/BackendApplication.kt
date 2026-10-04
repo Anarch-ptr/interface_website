@@ -36,6 +36,11 @@ interface BackendApplication {
     suspend fun udpInputConfiguration(deviceId: String): UdpInputConfigurationView
     suspend fun saveUdpInput(deviceId: String, commandId: String, expectedSavedRevision: Long, profile: RaspberryPiUdpInputProfile): UdpInputConfigurationView
     suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long): UdpInputConfigurationView
+    suspend fun applyUdpInput(deviceId: String, commandId: String, revision: Long, expectedSavedRevision: Long,
+        expectedAppliedRevision: Long, expectedResolutionGeneration: Long, forceReapply: Boolean): UdpInputConfigurationView =
+        applyUdpInput(deviceId, commandId, revision, expectedSavedRevision)
+    suspend fun udpNetworkResolutionPreview(deviceId: String, network: UdpNetworkProfile): NetworkResolutionPreview =
+        throw ApplicationFailure(ApplicationFailureCode.UNAVAILABLE)
     suspend fun udpDiagnostics(deviceId: String): UdpDiagnosticsView
     suspend fun networkInterfaces(): NetworkInterfacesView
     suspend fun createPacketInspectorLease(deviceId: String, previewBytes: Int): PacketInspectorLease
@@ -53,7 +58,7 @@ interface BackendApplication {
 }
 
 enum class ApplicationFailureCode { INVALID, NOT_FOUND, CONFLICT, REQUIRES_STOP, UNAVAILABLE, UDP_BIND_FAILED, UDP_APPLY_CONSISTENCY_FAILURE }
-class ApplicationFailure(val code: ApplicationFailureCode) : RuntimeException()
+class ApplicationFailure(val code: ApplicationFailureCode, val safeCode: String? = null) : RuntimeException()
 data class PageQuery(val after: HistoryCursor? = null, val limit: Int = 100, val from: Long? = null, val through: Long? = null)
 data class SessionPage(val items: List<SessionRecord>, val nextCursor: HistoryCursor?)
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
@@ -65,7 +70,10 @@ data class ConfigurationView(val revisions: ConfigurationRevisions, val saved: C
     val outcome: ConfigurationApplyOutcome? = null)
 data class UdpInputConfigurationView(val savedRevision: Long, val appliedRevision: Long,
     val configuration: RaspberryPiUdpInputProfile, val appliedConfiguration: RaspberryPiUdpInputProfile,
-    val outcome: RaspberryPiUdpApplyOutcome? = null)
+    val outcome: RaspberryPiUdpApplyOutcome? = null, val resolutionGeneration: Long = 0,
+    val appliedEffectiveNetworkPlan: EffectiveUdpNetworkPlan? = null,
+    val networkConsistencyStatus: NetworkConsistencyStatus = NetworkConsistencyStatus.HEALTHY,
+    val reapplyRequired: Boolean = false, val lastApplyError: String? = null)
 data class UdpDiagnosticsView(val operational: UdpOperationalStatusSnapshot, val counters: UdpDiagnosticsSnapshot)
 data class NetworkInterfacesView(val interfaces: List<Ipv4NetworkInterfaceEntry>, val selection: NetworkInterfaceSelection,
     val resolution: BackendIpv4Resolution, val listenPort: Int)

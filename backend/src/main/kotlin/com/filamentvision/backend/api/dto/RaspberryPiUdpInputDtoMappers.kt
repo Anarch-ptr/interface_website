@@ -1,27 +1,39 @@
 package com.filamentvision.backend.api.dto
 
 import com.filamentvision.backend.application.*
+import com.filamentvision.backend.input.network.*
 import com.filamentvision.backend.input.profile.*
 
 class UdpInputValidationException(val errors: List<UdpInputValidationError>) : IllegalArgumentException()
-
 private fun invalid(path: String, message: String): Nothing =
     throw UdpInputValidationException(listOf(UdpInputValidationError(path, "INVALID_VALUE", message)))
 private fun <T> required(value: T?, path: String): T = value ?: invalid(path, "Required field is missing")
 private inline fun <reified T : Enum<T>> enum(value: String?, path: String): T =
     enumValues<T>().find { it.name == value } ?: invalid(path, "Unsupported value")
 
-fun RaspberryPiUdpInputProfileDto.toDomain(): RaspberryPiUdpInputProfile {
-    val selection = when (networkInterface.mode) {
-        "AUTO" -> {
-            if (networkInterface.interfaceId != null || networkInterface.ipv4 != null) invalid("networkInterface", "AUTO does not accept a specific interface")
-            NetworkInterfaceSelection.Auto
-        }
-        "SPECIFIC" -> NetworkInterfaceSelection.Specific(required(networkInterface.interfaceId, "networkInterface.interfaceId"),
-            required(networkInterface.ipv4, "networkInterface.ipv4"))
-        else -> invalid("networkInterface.mode", "Unsupported interface selection")
+fun UdpNetworkProfileDto.toDomain(): UdpNetworkProfile {
+    val bindProfile = when (bind.mode) {
+        "AUTO" -> BindProfile.Auto
+        "ALL_INTERFACES" -> BindProfile.AllInterfaces
+        "SPECIFIC_INTERFACE" -> BindProfile.SpecificInterface(required(bind.interfaceId, "network.bind.interfaceId"), required(bind.ipv4, "network.bind.ipv4"))
+        "MANUAL_IP" -> BindProfile.ManualIp(required(bind.ipv4, "network.bind.ipv4"))
+        else -> invalid("network.bind.mode", "Unsupported bind mode")
     }
-    val profile = RaspberryPiUdpInputProfile(enabled, selection, listenPort, raspberryPiIpv4, payload.toDomain(),
+    val destinationProfile = when (destination.mode) {
+        "AUTO" -> AdvertisedDestinationProfile.Auto
+        "MANUAL" -> AdvertisedDestinationProfile.Manual(required(destination.hostOrIpv4, "network.destination.hostOrIpv4"))
+        else -> invalid("network.destination.mode", "Unsupported destination mode")
+    }
+    val sourceProfile = when (sourceFilter.mode) {
+        "ANY" -> SourceFilterProfile.Any
+        "IP_OR_HOST" -> SourceFilterProfile.IpOrHost(required(sourceFilter.hostOrIpv4, "network.sourceFilter.hostOrIpv4"))
+        else -> invalid("network.sourceFilter.mode", "Unsupported source filter mode")
+    }
+    return UdpNetworkProfile(bindProfile, destinationProfile, sourceProfile, listenPort)
+}
+
+fun RaspberryPiUdpInputProfileDto.toDomain(): RaspberryPiUdpInputProfile {
+    val profile = RaspberryPiUdpInputProfile(enabled, network.toDomain(), payload.toDomain(),
         DatagramEnvelopeProfile(envelope.headerHex, envelope.footerHex),
         TransportLimits(transportLimits.maxInFlightFrames, transportLimits.maxFrameBytes, transportLimits.frameTimeoutMs,
             transportLimits.maxChunkCount, transportLimits.maxChunkPayloadBytes))
@@ -48,12 +60,25 @@ private fun ImagePayloadDto.toDomain(): ImagePayloadProfile {
         else -> ImagePayloadProfile.Rgb888(required(width, "payload.width"), required(height, "payload.height"), enum(channelOrder, "payload.channelOrder"))
     }
 }
-fun NetworkInterfaceSelection.toDto() = when (this) {
-    NetworkInterfaceSelection.Auto -> NetworkInterfaceSelectionDto("AUTO")
-    is NetworkInterfaceSelection.Specific -> NetworkInterfaceSelectionDto("SPECIFIC", interfaceId, ipv4)
-}
-fun RaspberryPiUdpInputProfile.toDto() = RaspberryPiUdpInputProfileDto(enabled, networkInterface.toDto(), listenPort,
-    raspberryPiIpv4, payload.toDto(), DatagramEnvelopeDto(envelope.headerHex, envelope.footerHex),
+
+fun UdpNetworkProfile.toDto() = UdpNetworkProfileDto(
+    when (val v = bind) {
+        BindProfile.Auto -> BindProfileDto("AUTO")
+        BindProfile.AllInterfaces -> BindProfileDto("ALL_INTERFACES")
+        is BindProfile.SpecificInterface -> BindProfileDto("SPECIFIC_INTERFACE", v.interfaceId, v.ipv4)
+        is BindProfile.ManualIp -> BindProfileDto("MANUAL_IP", ipv4 = v.ipv4)
+    },
+    when (val v = destination) {
+        AdvertisedDestinationProfile.Auto -> DestinationProfileDto("AUTO")
+        is AdvertisedDestinationProfile.Manual -> DestinationProfileDto("MANUAL", v.hostOrIpv4)
+    },
+    when (val v = sourceFilter) {
+        SourceFilterProfile.Any -> SourceFilterProfileDto("ANY")
+        is SourceFilterProfile.IpOrHost -> SourceFilterProfileDto("IP_OR_HOST", v.hostOrIpv4)
+    }, listenPort)
+
+fun RaspberryPiUdpInputProfile.toDto() = RaspberryPiUdpInputProfileDto(enabled, network.toDto(), payload.toDto(),
+    DatagramEnvelopeDto(envelope.headerHex, envelope.footerHex),
     transportLimits.let { TransportLimitsDto(it.maxInFlightFrames, it.maxFrameBytes, it.frameTimeoutMs, it.maxChunkCount, it.maxChunkPayloadBytes) })
 private fun ImagePayloadProfile.toDto() = when (this) {
     is ImagePayloadProfile.Jpeg -> ImagePayloadDto("JPEG", maxFrameBytes = maxFrameBytes, expectedWidth = expectedWidth, expectedHeight = expectedHeight)
@@ -61,11 +86,18 @@ private fun ImagePayloadProfile.toDto() = when (this) {
     is ImagePayloadProfile.Binary -> ImagePayloadDto("BINARY", width, height, packing = packing.name)
     is ImagePayloadProfile.Rgb888 -> ImagePayloadDto("RGB888", width, height, channelOrder = channelOrder.name)
 }
+fun EffectiveUdpNetworkPlan.toDto() = EffectiveUdpNetworkPlanDto(actualBindIpv4, actualBindInterfaceId,
+    configuredDestination, resolvedDestinationIpv4, configuredSource, resolvedSourceIpv4s,
+    destinationStatus.name, sourceStatus.name, planCreatedAtEpochMillis, appliedAtEpochMillis, resolutionGeneration)
 fun UdpInputConfigurationView.toDto() = UdpInputConfigurationStateDto(savedRevision, appliedRevision,
-    configuration.toDto(), appliedConfiguration.toDto(), outcome?.name)
+    resolutionGeneration, configuration.toDto(), appliedConfiguration.toDto(), appliedEffectiveNetworkPlan?.toDto(),
+    networkConsistencyStatus.name, reapplyRequired, lastApplyError, outcome?.name)
+fun NetworkResolutionPreview.toDto() = UdpNetworkResolutionPreviewDto(configuredDestination, configuredSource,
+    candidatePlan?.toDto(), destinationStatus.name, sourceStatus.name, consistencyStatus.name,
+    reapplyRequired, differences, warnings, errorCode, previewedAtEpochMillis, appliedResolutionGeneration, superseded)
 fun NetworkInterfacesView.toDto() = NetworkInterfacesDto(interfaces.map {
     Ipv4NetworkInterfaceDto(it.id, it.displayName, it.ipv4, it.isUp, it.isLoopback, it.isVirtual, it.supportsMulticast)
-}, selection.toDto(), resolution.advertisedBackendIpv4, listenPort, resolution.hasMultipleCandidates, resolution.statusDetail)
+})
 fun UdpDiagnosticsView.toDto() = counters.let { d -> UdpDiagnosticsDto(operational.status.name, operational.detail,
     d.datagramsReceived, d.bytesReceived, d.framesStarted, d.framesCompleted, d.framesDropped, d.duplicateChunks,
     d.outOfOrderChunks, d.missingChunks, d.lateChunks, d.reassemblyTimeouts, d.invalidTransportHeaders, d.oversizedFrames,
