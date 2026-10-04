@@ -46,5 +46,7 @@ Assert-Contains $stop 'taskkill.exe /PID $savedPid /T /F' 'Stop must target only
 
 $dialogCount = ([regex]::Matches($vbs, '(?im)^\s*MsgBox\b')).Count
 if ($dialogCount -ne 1) { throw "Only the outer VBS may show a GUI error dialog; found $dialogCount MsgBox calls." }
+Assert-Contains $vbs 'launcher.lock' 'The outer VBS must own a lock across startup and its error dialog.'
+Assert-Contains $vbs 'CreateTextFile(lockFile, False)' 'The VBS lock acquisition must be atomic.'
 
 Write-Output 'LAUNCHER_CONTRACT PASS'
