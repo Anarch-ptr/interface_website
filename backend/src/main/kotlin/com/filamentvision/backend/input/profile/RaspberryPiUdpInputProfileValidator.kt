@@ -16,15 +16,16 @@ fun normalizeTwoByteHex(value: String): String {
 class RaspberryPiUdpInputProfileValidator {
     fun validate(profile: RaspberryPiUdpInputProfile): UdpInputValidationResult {
         val errors = mutableListOf<UdpInputValidationError>()
-        if (profile.listenPort !in 1..65_535) errors.range("listenPort", "Listen port must be between 1 and 65535")
-        when (val selection = profile.networkInterface) {
-            NetworkInterfaceSelection.Auto -> Unit
-            is NetworkInterfaceSelection.Specific -> {
-                if (selection.interfaceId.isBlank()) errors.invalid("networkInterface.interfaceId", "Select a network interface")
-                validateIpv4("networkInterface.ipv4", selection.ipv4, errors)
+        errors += UdpNetworkProfileValidator().validate(profile.network).errors.map { networkError ->
+            val legacyPath = when (networkError.path) {
+                "listenPort" -> "listenPort"
+                "bind.interfaceId" -> "networkInterface.interfaceId"
+                "bind.ipv4" -> "networkInterface.ipv4"
+                "sourceFilter.hostOrIpv4" -> "raspberryPiIpv4"
+                else -> "network.${networkError.path}"
             }
+            networkError.copy(path = legacyPath)
         }
-        profile.raspberryPiIpv4?.let { validateIpv4("raspberryPiIpv4", it, errors) }
         validateLimits(profile.transportLimits, errors)
         validatePayload(profile.payload, profile.transportLimits, errors)
         validateEnvelope("envelope.headerHex", profile.envelope.headerHex, errors)
@@ -96,15 +97,6 @@ class RaspberryPiUdpInputProfileValidator {
 
     private fun validateDimension(path: String, dimension: Int?, maximum: Int, errors: MutableList<UdpInputValidationError>) {
         if (dimension != null && dimension !in 1..maximum) errors.range(path, "Dimension must be between 1 and $maximum")
-    }
-
-    private fun validateIpv4(path: String, value: String, errors: MutableList<UdpInputValidationError>) {
-        val parts = value.split('.')
-        val valid = parts.size == 4 && parts.all {
-            it.isNotEmpty() && it.all { digit -> digit in '0'..'9' } &&
-                (it.length == 1 || it.first() != '0') && it.toIntOrNull() in 0..255
-        }
-        if (!valid) errors.invalid(path, "Accepts only canonical IPv4 literals")
     }
 
     private fun validateEnvelope(path: String, value: String, errors: MutableList<UdpInputValidationError>) {

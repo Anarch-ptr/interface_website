@@ -10,6 +10,18 @@ data class RaspberryPiUdpInputProfile(
     val envelope: DatagramEnvelopeProfile,
     val transportLimits: TransportLimits,
 ) {
+    /** Flexible network intent view. Runtime migration occurs in later delta tasks. */
+    val network: UdpNetworkProfile
+        get() = UdpNetworkProfile(
+            bind = when (val selection = networkInterface) {
+                NetworkInterfaceSelection.Auto -> BindProfile.Auto
+                is NetworkInterfaceSelection.Specific -> BindProfile.SpecificInterface(selection.interfaceId, selection.ipv4)
+            },
+            destination = AdvertisedDestinationProfile.Auto,
+            sourceFilter = raspberryPiIpv4?.let(SourceFilterProfile::IpOrHost) ?: SourceFilterProfile.Any,
+            listenPort = listenPort,
+        )
+
     companion object {
         /** Disabled until the operator verifies the sender and applies the profile. */
         fun defaults() = RaspberryPiUdpInputProfile(

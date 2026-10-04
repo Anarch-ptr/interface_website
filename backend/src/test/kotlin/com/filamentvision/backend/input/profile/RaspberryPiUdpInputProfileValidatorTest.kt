@@ -41,12 +41,12 @@ class RaspberryPiUdpInputProfileValidatorTest {
     }
 
     @Test
-    fun senderFilterIsOptionalAndAcceptsOnlyCanonicalIpv4Literals() {
+    fun senderFilterIsOptionalAndAcceptsCanonicalIpv4OrHostnameIntent() {
         assertValid(defaults.copy(raspberryPiIpv4 = null))
-        listOf("10.0.0.1", "192.168.20.200", "255.255.255.255").forEach { ip ->
-            assertValid(defaults.copy(raspberryPiIpv4 = ip))
+        listOf("10.0.0.1", "192.168.20.200", "255.255.255.255", "camera.local", "filament-pi").forEach { host ->
+            assertValid(defaults.copy(raspberryPiIpv4 = host))
         }
-        invalidIpv4.forEach { ip -> assertPaths(defaults.copy(raspberryPiIpv4 = ip), "raspberryPiIpv4") }
+        invalidHostOrIpv4.forEach { value -> assertPaths(defaults.copy(raspberryPiIpv4 = value), "raspberryPiIpv4") }
     }
 
     @Test
@@ -214,6 +214,7 @@ class RaspberryPiUdpInputProfileValidatorTest {
     private companion object {
         const val MIB = 1024 * 1024
         val invalidIpv4 = listOf("", "::1", "2001:db8::1", "camera.local", "192.168.1", "192.168.1.256", "192.168.001.1", " 127.0.0.1 ", "１.2.3.4")
+        val invalidHostOrIpv4 = listOf("", "::1", "2001:db8::1", "pi.local:5101", "pi local", "pi..local", " 127.0.0.1 ", "１.2.3.4")
         val invalidHex = listOf("", " ", "AA", "AA 01 02", "AA0", "GG 01", "AA-01", "0xAA01", "ＡＡ01")
     }
 }
