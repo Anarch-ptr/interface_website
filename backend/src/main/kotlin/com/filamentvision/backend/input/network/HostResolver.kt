@@ -34,6 +34,10 @@ data class HostResolution(
     val errorCode: String? = null,
 )
 
+fun interface Ipv4HostResolver {
+    suspend fun resolveIpv4(hostOrIpv4: String): HostResolution
+}
+
 class HostResolver(
     private val lookup: HostLookup = HostLookup { hostname ->
         InetAddress.getAllByName(hostname).map(InetAddress::getHostAddress)
@@ -41,7 +45,7 @@ class HostResolver(
     private val timeoutMillis: Long = 3_000,
     private val clockMillis: () -> Long = System::currentTimeMillis,
     private val executor: ThreadPoolExecutor = newBoundedExecutor(),
-) : AutoCloseable {
+) : Ipv4HostResolver, AutoCloseable {
     private val maximumActive = AtomicInteger()
     private val maximumQueued = AtomicInteger()
 
@@ -51,7 +55,7 @@ class HostResolver(
     val maximumQueuedLookupCount: Int get() = maximumQueued.get()
     val retainedResultCount: Int get() = 0
 
-    suspend fun resolveIpv4(hostOrIpv4: String): HostResolution {
+    override suspend fun resolveIpv4(hostOrIpv4: String): HostResolution {
         val timestamp = clockMillis()
         val normalized = try {
             normalizeHostOrIpv4(hostOrIpv4)
